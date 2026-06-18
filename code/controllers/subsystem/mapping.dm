@@ -452,7 +452,18 @@ Used by the AI doomsday and the self-destruct nuke.
 	// load the station
 	station_start = world.maxz + 1
 	INIT_ANNOUNCE("Loading [current_map.map_name]...")
-	LoadGroup(FailedZs, "Station", current_map.map_path, current_map.map_file, current_map.traits, ZTRAITS_STATION, height_autosetup = current_map.height_autosetup)
+	//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - autoload a saved Station/Lavaland snapshot in place of the shipped maps
+	// Validate + stage the snapshot up front. If anything is off (missing/old/size-mismatched manifest,
+	// staging failure) persistent_snapshot stays null and every group below takes the vanilla path.
+	// A corrupt snapshot must never brick boot (design sec 5.2).
+	var/datum/persistent_map_manifest/persistent_snapshot = load_persistent_manifest()
+	if(persistent_snapshot && !stage_persistent_files_to_custom(persistent_snapshot))
+		persistent_snapshot = null
+	if(persistent_snapshot)
+		INIT_ANNOUNCE("Loading PERSISTENT station snapshot (v[persistent_snapshot.version])...")
+	if(!(persistent_snapshot && load_persistent_group(FailedZs, persistent_snapshot, PERSISTENT_ROLE_STATION, "Station", ZTRAITS_STATION, current_map.height_autosetup)))
+		//SPLURT EDIT ADDITION END
+		LoadGroup(FailedZs, "Station", current_map.map_path, current_map.map_file, current_map.traits, ZTRAITS_STATION, height_autosetup = current_map.height_autosetup)
 
 	if(SSdbcore.Connect())
 		var/datum/db_query/query_round_map_name = SSdbcore.NewQuery({"
@@ -464,7 +475,12 @@ Used by the AI doomsday and the self-destruct nuke.
 #ifndef LOWMEMORYMODE
 
 	if(current_map.minetype == MINETYPE_LAVALAND)
-		LoadGroup(FailedZs, "Lavaland", "map_files/Mining", "Lavaland.dmm", default_traits = ZTRAITS_LAVALAND)
+		//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - prefer the persisted Lavaland snapshot when present
+		if(persistent_snapshot && persistent_snapshot.has_role(PERSISTENT_ROLE_LAVALAND))
+			load_persistent_group(FailedZs, persistent_snapshot, PERSISTENT_ROLE_LAVALAND, "Lavaland", ZTRAITS_LAVALAND, FALSE)
+		else
+			//SPLURT EDIT ADDITION END
+			LoadGroup(FailedZs, "Lavaland", "map_files/Mining", "Lavaland.dmm", default_traits = ZTRAITS_LAVALAND)
 	else if (!isnull(current_map.minetype) && current_map.minetype != MINETYPE_NONE && current_map.minetype != MINETYPE_ICE)
 		INIT_ANNOUNCE("WARNING: An unknown minetype '[current_map.minetype]' was set! This is being ignored! Update the maploader code!")
 #endif
@@ -478,6 +494,11 @@ Used by the AI doomsday and the self-destruct nuke.
 		INIT_ANNOUNCE(msg)
 #undef INIT_ANNOUNCE
 
+	//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - remove the staged snapshot copies (mirroring the custom-map cleanup below) and free the manifest datum
+	if(persistent_snapshot)
+		cleanup_persistent_staged_files(persistent_snapshot)
+		qdel(persistent_snapshot)
+	//SPLURT EDIT ADDITION END
 	// Custom maps are removed after station loading so the map files does not persist for no reason.
 	if(current_map.map_path == CUSTOM_MAP_PATH)
 		fdel("_maps/custom/[current_map.map_file]")

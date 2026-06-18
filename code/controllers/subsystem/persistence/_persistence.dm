@@ -80,6 +80,7 @@ SUBSYSTEM_DEF(persistence)
 	load_tram_counter()
 	load_adventures()
 	load_storyteller_type() //BUBBER EDIT ADD - Storyteller
+	load_persistent_mobs() //SPLURT EDIT ADDITION - PERSISTENT_MAP - restore the saved mob actor layer (runs after mapping+atoms init; see design sec 12.9)
 	return SS_INIT_SUCCESS
 
 ///Collects all data to persist.
@@ -91,6 +92,9 @@ SUBSYSTEM_DEF(persistence)
 	save_randomized_recipes()
 	save_scars()
 	save_custom_outfits()
+	//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - write a coherent snapshot (DMM map + JSON actor layers) at round end
+	save_persistent_snapshot()
+	//SPLURT EDIT ADDITION END
 	save_modular_persistence() // SKYRAT EDIT ADDITION - MODULAR_PERSISTENCE
 	save_delamination_counter()
 	save_queued_message_bottles()
