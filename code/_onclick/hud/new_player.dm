@@ -332,6 +332,11 @@
 
 	var/mob/dead/new_player/new_player = hud.mymob
 
+	//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - offer a matching persisted body the instant they click Join, before the job menu (design sec 8.6)
+	if(new_player.offer_persistent_body())
+		return
+	//SPLURT EDIT ADDITION END
+
 	if(SSticker.queued_players.len || (relevant_cap && living_player_count() >= relevant_cap && !(ckey(new_player.key) in GLOB.admin_datums)))
 		to_chat(new_player, span_danger("[CONFIG_GET(string/hard_popcap_message)]"))
 

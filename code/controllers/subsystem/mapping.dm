@@ -475,12 +475,7 @@ Used by the AI doomsday and the self-destruct nuke.
 #ifndef LOWMEMORYMODE
 
 	if(current_map.minetype == MINETYPE_LAVALAND)
-		//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - prefer the persisted Lavaland snapshot when present
-		if(persistent_snapshot && persistent_snapshot.has_role(PERSISTENT_ROLE_LAVALAND))
-			load_persistent_group(FailedZs, persistent_snapshot, PERSISTENT_ROLE_LAVALAND, "Lavaland", ZTRAITS_LAVALAND, FALSE)
-		else
-			//SPLURT EDIT ADDITION END
-			LoadGroup(FailedZs, "Lavaland", "map_files/Mining", "Lavaland.dmm", default_traits = ZTRAITS_LAVALAND)
+		LoadGroup(FailedZs, "Lavaland", "map_files/Mining", "Lavaland.dmm", default_traits = ZTRAITS_LAVALAND)
 	else if (!isnull(current_map.minetype) && current_map.minetype != MINETYPE_NONE && current_map.minetype != MINETYPE_ICE)
 		INIT_ANNOUNCE("WARNING: An unknown minetype '[current_map.minetype]' was set! This is being ignored! Update the maploader code!")
 #endif

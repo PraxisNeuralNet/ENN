@@ -2,24 +2,17 @@
 // See PERSISTENT_MAP_DESIGN.md sec 3, sec 4.2, sec 12.2.
 
 /// Returns TRUE if a z-level should be included in the persistent map snapshot.
-/// v1 scope: Station + Lavaland only. Transient/ephemeral planes (reserved/transit,
-/// centcom, away, secret) are always excluded, and space ruins regenerate each round
-/// rather than being frozen (design sec 10.1).
+/// Scope: Station ONLY. Lavaland, space ruins, away/centcom/transit/secret all regenerate each
+/// round rather than being frozen (design sec 10.1, narrowed from Station+Lavaland by request).
 /proc/is_persistent_level(z)
 	if(is_reserved_level(z) || is_centcom_level(z) || is_away_level(z) || is_secret_level(z))
 		return FALSE
-	return is_station_level(z) || is_mining_level(z)
+	return is_station_level(z)
 
 /// Maps a persistent z-level to its logical role string, or null if it isn't persisted.
-/// Station is checked first so a hypothetical dual-trait level groups as station.
+/// Only the station is persisted, so every persistent level is the station role.
 /proc/persistent_level_role(z)
-	if(!is_persistent_level(z))
-		return null
-	if(is_station_level(z))
-		return PERSISTENT_ROLE_STATION
-	if(is_mining_level(z))
-		return PERSISTENT_ROLE_LAVALAND
-	return null
+	return is_persistent_level(z) ? PERSISTENT_ROLE_STATION : null
 
 /// Object typecache excluded from the persistent station snapshot.
 ///
@@ -47,13 +40,6 @@
 	var/saved_maxy
 	/// Ordered level records: list("role", "ordinal", "file", "traits", "staged_file").
 	var/list/levels = list()
-
-/// TRUE if the snapshot contains at least one level for the given logical role.
-/datum/persistent_map_manifest/proc/has_role(role)
-	for(var/list/record as anything in levels)
-		if(record["role"] == role)
-			return TRUE
-	return FALSE
 
 /// All level records for a role, in saved order (the save loop emits ascending ordinals).
 /datum/persistent_map_manifest/proc/records_for_role(role)

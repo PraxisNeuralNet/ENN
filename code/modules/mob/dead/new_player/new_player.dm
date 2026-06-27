@@ -188,10 +188,6 @@
 
 
 /mob/dead/new_player/proc/AttemptLateSpawn(rank)
-	//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - offer a dormant persisted body first (opt-in, non-authoritative; design sec 8.6)
-	if(offer_persistent_body())
-		return TRUE
-	//SPLURT EDIT ADDITION END
 	// Check that they're picking someone new for new character respawning
 	if(CONFIG_GET(flag/allow_respawn) == RESPAWN_FLAG_NEW_CHARACTER)
 		if("[client.prefs.default_slot]" in persistent_client.joined_as_slots)

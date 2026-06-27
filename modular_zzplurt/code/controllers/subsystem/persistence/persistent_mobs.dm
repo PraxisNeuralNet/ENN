@@ -143,8 +143,11 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		// null key and active = FALSE, so transfer_to() does NOT PossessByPlayer  -  the body stays an
 		// inert clientless NPC carrying a dormant mind, exactly as sec 8.6 requires.
 		dormant.transfer_to(body)
-		dormant.deserialize_persistent(record["mind"])
+		// Register the claimable body BEFORE restoring mind contents. Re-adding antag datums at init
+		// can runtime (their on_gain may touch not-yet-ready state), which would abort this proc - so
+		// registering first guarantees the body is offerable in the lobby regardless of mind-restore issues.
 		register_claimable_body(ckey(record["ckey"]), body)
+		dormant.deserialize_persistent(record["mind"])
 
 	return body
 
@@ -172,5 +175,14 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	if(!body || !claimant?.client)
 		return null
 	claimable_bodies -= target_ckey
+	// Capture prefs before PossessByPlayer moves the client off the claimant.
+	var/datum/preferences/prefs = claimant.client.prefs
 	body.PossessByPlayer(claimant.client.ckey)
+	// The DMM/JSON layers restore the body (DNA appearance, inventory, damage); the player's character
+	// PREFERENCES restore the identity that lives outside the body - name, flavor text, and prefs-driven
+	// visual customization (item/accessory colouring). visuals_only = TRUE applies those WITHOUT
+	// re-equipping the loadout, so the persisted inventory is left intact. (This is the disconnected-safe
+	// equivalent of how bitrunning dresses an avatar via safe_transfer_prefs_to.)
+	if(prefs && ishuman(body))
+		prefs.safe_transfer_prefs_to(body, visuals_only = TRUE)
 	return body

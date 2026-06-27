@@ -11,11 +11,10 @@
 /// A mismatch invalidates the snapshot and load falls back to shipped maps (design sec 5.2).
 #define PERSISTENT_MAP_VERSION 1
 
-/// Logical role groups persisted in v1. Manifest records are keyed by role + ordinal
-/// rather than absolute z, so snapshots survive base-map/build z-shifts (design sec 12.2).
-/// v1 scope is Station + Lavaland only; space ruins regenerate each round (design sec 10.1).
+/// Logical role for a persisted level. Manifest records are keyed by role + ordinal rather than
+/// absolute z, so snapshots survive base-map/build z-shifts (design sec 12.2). Scope is Station
+/// ONLY - Lavaland and space ruins regenerate each round (design sec 10.1).
 #define PERSISTENT_ROLE_STATION "station"
-#define PERSISTENT_ROLE_LAVALAND "lavaland"
 
 /// JSON actor-layer (mobs + nested inventory) storage path and format version.
 #define PERSISTENT_MOB_FILE "data/persistent_mobs.json"

@@ -151,6 +151,10 @@
 	if(dna)
 		.["dna"] = list(
 			"species" = "[dna.species?.type]",
+			// unique_identity encodes the VISIBLE character (hair, eye/skin colour, etc.) as DNA blocks;
+			// without it a restored body keeps Initialize's random look. mutation_index carries genes.
+			"unique_identity" = dna.unique_identity,
+			"mutation_index" = dna.mutation_index?.Copy(),
 			"unique_enzymes" = dna.unique_enzymes,
 			"blood_type" = dna.blood_type?.id,
 			"real_name" = dna.real_name,
@@ -196,12 +200,40 @@
 			continue
 		part.receive_damage(brute = clamp((limb_data["brute"] || 0), 0, PERSISTENT_DAMAGE_CAP), burn = clamp((limb_data["burn"] || 0), 0, PERSISTENT_DAMAGE_CAP), updating_health = FALSE, forced = TRUE)
 
-/// Rebuild species + dna identity from a saved dna sub-record. Species path is allowlist-gated.
+/// Rebuild species + full dna identity (appearance included) from a saved dna sub-record.
+/// Species path is allowlist-gated; an un-allowed/garbage species falls back to the spawned body.
+///
+/// For humans we use hardset_dna() - the canonical "set all DNA at once and rebuild the body" proc -
+/// so unique_identity (appearance), mutation_index, species, features, blood, and name are restored
+/// together and the body is re-rendered, instead of keeping Initialize's random look. (For a LIVE
+/// player, bitrunning copies the character via prefs.safe_transfer_prefs_to(); a persisted body is
+/// disconnected, so we reconstruct from the serialized DNA instead.)
 /mob/living/carbon/proc/restore_persistent_dna(list/dna_data)
 	if(!islist(dna_data))
 		return
 	var/species_path = text2path(dna_data["species"])
-	if(ispath(species_path, /datum/species) && is_persistent_type_allowed(species_path))
+	if(!ispath(species_path, /datum/species) || !is_persistent_type_allowed(species_path))
+		species_path = null
+
+	if(ishuman(src))
+		var/mob/living/carbon/human/human = src
+		human.hardset_dna(
+			dna_data["unique_identity"],
+			islist(dna_data["mutation_index"]) ? dna_data["mutation_index"] : null,
+			null, // default_mutation_genes - hardset_dna mirrors mutation_index when null
+			sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN),
+			get_blood_type(dna_data["blood_type"]),
+			species_path ? new species_path : null,
+			islist(dna_data["features"]) ? dna_data["features"].Copy() : null
+		)
+		// hardset_dna regenerates unique_enzymes from the name; restore the saved value so forensic
+		// DNA / cloning records round-trip. (No appearance impact - hardset_dna already rebuilt the body.)
+		if(istext(dna_data["unique_enzymes"]) && human.dna)
+			human.dna.unique_enzymes = dna_data["unique_enzymes"]
+		return
+
+	// Non-human carbons (e.g. monkeys) have no DNA-block appearance; restore the basics directly.
+	if(species_path)
 		set_species(new species_path)
 	if(!dna)
 		return

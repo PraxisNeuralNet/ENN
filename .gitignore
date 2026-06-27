@@ -10,6 +10,9 @@
 /tmp/**/*
 /cache/**/*
 
+#Ignore persistent-map snapshot files staged into _maps/custom at boot (transient; regenerated from data/ each round).
+/_maps/custom/persistent_*.dmm
+
 #Ignore byond config folder.
 /cfg/**/*
 
