@@ -14,12 +14,16 @@
 /// Produce a JSON-ready record describing this mob. Override on subtypes to add type-specific state;
 /// always call ..() so the shared envelope (type/coords/health/inventory) is included.
 /mob/living/proc/serialize_persistent()
+	// Coordinates come from get_turf(): a mob inside a container (body bag, locker, sleeper, vehicle)
+	// has x/y/z of 0, which would restore into the void. Saving the container's turf instead means a
+	// contained mob restores onto that turf (see PERSISTENT_MAP_SYSTEM.md sec 10).
+	var/turf/save_turf = get_turf(src)
 	. = list(
 		"version" = PERSISTENT_MOB_VERSION,
 		"type" = "[type]",
-		"x" = x,
-		"y" = y,
-		"z" = z,
+		"x" = save_turf ? save_turf.x : x,
+		"y" = save_turf ? save_turf.y : y,
+		"z" = save_turf ? save_turf.z : z,
 		"name" = name,
 		"health" = health,
 		"max_health" = maxHealth,
@@ -182,9 +186,14 @@
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
 				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
-	if(dna?.real_name)
-		real_name = dna.real_name
-		name = dna.real_name
+	// Prefer the SAVED name over dna.real_name: if hardset_dna aborted early (see
+	// restore_persistent_dna), dna.real_name still holds Initialize's random name and reading it
+	// here would clobber the correct name the base pass just applied from the record.
+	var/list/dna_data = data["dna"]
+	var/saved_real_name = islist(dna_data) ? sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN) : null
+	if(saved_real_name)
+		real_name = saved_real_name
+		name = saved_real_name
 
 /// Carbons take damage per-limb, so we skip the global brute/burn channels (which would distribute
 /// a SECOND copy of the damage) and only restore tox/oxy globally + brute/burn onto each bodypart.
@@ -217,15 +226,40 @@
 
 	if(ishuman(src))
 		var/mob/living/carbon/human/human = src
-		human.hardset_dna(
-			dna_data["unique_identity"],
-			islist(dna_data["mutation_index"]) ? dna_data["mutation_index"] : null,
-			null, // default_mutation_genes - hardset_dna mirrors mutation_index when null
-			sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN),
-			get_blood_type(dna_data["blood_type"]),
-			species_path ? new species_path : null,
-			islist(dna_data["features"]) ? dna_data["features"].Copy() : null
-		)
+		var/saved_real_name = sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN)
+		// json_encode turns mutation_index's typepath KEYS into strings; rebuild real typepaths
+		// (dropping garbage) so domutcheck() inside hardset_dna gets what it expects.
+		var/list/mutation_index
+		if(islist(dna_data["mutation_index"]))
+			mutation_index = list()
+			for(var/mutation_text in dna_data["mutation_index"])
+				var/mutation_path = text2path("[mutation_text]")
+				if(ispath(mutation_path, /datum/mutation))
+					mutation_index[mutation_path] = dna_data["mutation_index"][mutation_text]
+			if(!length(mutation_index))
+				mutation_index = null
+		// hardset_dna applies dna.features FIRST and dna.real_name only later, so if a json-degraded
+		// field runtimes inside it the proc aborts with flavor text applied but the name still
+		// Initialize-random. Contain the abort, log it, and apply the identity manually below.
+		try
+			human.hardset_dna(
+				dna_data["unique_identity"],
+				mutation_index,
+				null, // default_mutation_genes - hardset_dna mirrors mutation_index when null
+				saved_real_name,
+				get_blood_type(dna_data["blood_type"]),
+				species_path ? new species_path : null,
+				islist(dna_data["features"]) ? dna_data["features"].Copy() : null
+			)
+		catch(var/exception/error)
+			log_world("PERSISTENT_MAP: hardset_dna failed while restoring [saved_real_name || "an unnamed body"]: [error]")
+		// hardset_dna sets dna.real_name but NEVER the mob's real_name/name (and may have aborted
+		// before even that) - force all three from the saved value directly.
+		if(saved_real_name)
+			if(human.dna)
+				human.dna.real_name = saved_real_name
+			human.real_name = saved_real_name
+			human.name = saved_real_name
 		// hardset_dna regenerates unique_enzymes from the name; restore the saved value so forensic
 		// DNA / cloning records round-trip. (No appearance impact - hardset_dna already rebuilt the body.)
 		if(istext(dna_data["unique_enzymes"]) && human.dna)
@@ -249,6 +283,9 @@
 
 // =================================================================================================
 // Silicon  -  cyborg & AI (model/cell + laws, design sec 8.3)
+// NOTE: silicons are NOT currently in the persistence allowlist (carbons only - see
+// generate_persistent_type_allowlist() in persistent_mobs.dm). This support code is kept so a
+// deployment can re-enable them by allowlisting /mob/living/silicon paths again.
 // =================================================================================================
 
 /mob/living/silicon/serialize_persistent()
@@ -331,8 +368,14 @@
 	if(length(known_skills))
 		var/list/skills = list()
 		for(var/skill_path in known_skills)
-			skills["[skill_path]"] = known_skills[skill_path]
-		.["skills"] = skills
+			// known_skills values are list(SKILL_LVL, SKILL_EXP), NOT numbers - store just the level.
+			// (Storing the raw list json-encodes fine but round()/clamp() on it runtimes at restore.)
+			var/list/skill_data = known_skills[skill_path]
+			if(!islist(skill_data) || skill_data[SKILL_LVL] <= SKILL_LEVEL_NONE)
+				continue
+			skills["[skill_path]"] = skill_data[SKILL_LVL]
+		if(length(skills))
+			.["skills"] = skills
 
 /datum/mind/proc/deserialize_persistent(list/data)
 	if(!islist(data))
@@ -354,5 +397,5 @@
 		var/list/skills = data["skills"]
 		for(var/skill_text in skills)
 			var/skill_path = text2path(skill_text)
-			if(ispath(skill_path, /datum/skill))
+			if(ispath(skill_path, /datum/skill) && isnum(skills[skill_text]))
 				set_level(skill_path, clamp(round(skills[skill_text]), SKILL_LEVEL_NONE, SKILL_LEVEL_LEGENDARY), silent = TRUE)

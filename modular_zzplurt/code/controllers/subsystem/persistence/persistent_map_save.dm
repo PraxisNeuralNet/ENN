@@ -9,16 +9,20 @@
 /// Coherent snapshot entry point: writes the DMM map layer AND the JSON actor layer under a single
 /// guard, so the two layers describe the same moment and reload together. This is what the round-end
 /// collector and the admin "Save Persistent Map" verb call. Returns FALSE if a save is already in
-/// flight. (The map pass is itself a multi-tick best-effort snapshot per design sec 6.3, so this is
-/// "coherent enough" - it deliberately does not hard-freeze the world.)
+/// flight OR the map layer failed to write (in which case the actor layer is skipped too, so both
+/// layers keep describing the previous committed snapshot). (The map pass is itself a multi-tick
+/// best-effort snapshot per design sec 6.3, so this is "coherent enough" - it deliberately does not
+/// hard-freeze the world.)
 /datum/controller/subsystem/persistence/proc/save_persistent_snapshot()
 	if(map_saving)
 		return FALSE
 	map_saving = TRUE
-	write_persistent_map_files()
-	save_persistent_mobs()
+	. = write_persistent_map_files()
+	if(.)
+		save_persistent_mobs()
+	else
+		log_world("PERSISTENT_MAP: map layer save failed; actor layer skipped so both layers stay in sync with the previous snapshot.")
 	map_saving = FALSE
-	return TRUE
 
 /// Map-only guarded entry, kept for standalone use (callers that want just the physical world).
 /// Prefer save_persistent_snapshot() so the actor layer stays in sync with the map.
@@ -29,10 +33,11 @@
 	write_persistent_map_files()
 	map_saving = FALSE
 
-/// Serializes every persistent z-level (Station + Lavaland in v1) to one TGM .dmm file each, then
-/// writes the manifest LAST as the commit marker. write_map() is internally CHECK_TICK-throttled and
-/// we CHECK_TICK between levels, so the pass spreads safely across many ticks and never freezes the
-/// server. NOTE: this is the guard-free worker - callers (above) own the map_saving guard.
+/// Serializes every persistent z-level (Station only in v1) to one TGM .dmm file each, then
+/// writes the manifest LAST as the commit marker. Returns TRUE if the manifest was committed.
+/// write_map() is internally CHECK_TICK-throttled and we CHECK_TICK between levels, so the pass
+/// spreads safely across many ticks and never freezes the server. NOTE: this is the guard-free
+/// worker - callers (above) own the map_saving guard.
 /datum/controller/subsystem/persistence/proc/write_persistent_map_files()
 	var/list/manifest = list(
 		"version" = PERSISTENT_MAP_VERSION,
@@ -56,8 +61,11 @@
 		// templates; baked shuttle areas + docking ports would double-register and duplicate (design sec 12.1).
 		var/map_text = write_map(1, 1, z, world.maxx, world.maxy, z, ALL & ~SAVE_MOBS, SAVE_SHUTTLEAREA_IGNORE, obj_blacklist)
 		if(!map_text)
-			log_world("PERSISTENT_MAP: write_map produced no data for z[z] ([role]); skipping level.")
-			continue
+			// Abort the WHOLE snapshot rather than skipping the level: a manifest missing a z passes
+			// every load-side validation and would boot an incomplete station with no fallback. Not
+			// writing the manifest leaves the previous one as the commit marker instead.
+			log_world("PERSISTENT_MAP: write_map produced no data for z[z] ([role]); aborting snapshot, previous manifest kept.")
+			return FALSE
 
 		// BYOND has no atomic rename, so we rotate a single .bak before overwriting: a crash
 		// mid-write still leaves a loadable prior snapshot for this level (design sec 6.5).
@@ -78,6 +86,13 @@
 		))
 		CHECK_TICK
 
+	// Never clobber a good manifest with an empty one (no persistent levels found - shouldn't happen,
+	// but an empty manifest would discard the prior snapshot for nothing).
+	if(!length(manifest["levels"]))
+		log_world("PERSISTENT_MAP: no persistent levels serialized; manifest not written.")
+		return FALSE
+
 	// Written LAST. Presence + matching version is the only "snapshot committed" signal the loader
 	// trusts; a crash before this point leaves the previous manifest (or none) -> clean fallback.
 	rustg_file_write(json_encode(manifest), PERSISTENT_MAP_MANIFEST)
+	return TRUE

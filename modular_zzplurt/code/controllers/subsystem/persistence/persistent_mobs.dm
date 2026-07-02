@@ -23,11 +23,11 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 
 /proc/generate_persistent_type_allowlist()
 	return typecacheof(list(
-		/mob/living/basic,
-		/mob/living/simple_animal,
-		/mob/living/carbon/human,
-		/mob/living/silicon/robot,
-		/mob/living/silicon/ai,
+		// Mob scope: CARBONS ONLY (player characters, monkeys, etc.). Simple/basic animals and
+		// silicons were deliberately removed from persistence - they do not carry across rounds.
+		// (The silicon serialize/deserialize support in mob_serialization.dm is kept so a deployment
+		// can re-enable them by adding /mob/living/silicon paths back here.)
+		/mob/living/carbon,
 		/obj/item,
 		/datum/species,
 		/datum/antagonist,
@@ -45,13 +45,14 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 /proc/sanitize_persistent_text(text, max_len = PERSISTENT_MAX_NAME_LEN)
 	if(!istext(text))
 		return null
-	return trim(STRIP_HTML_SIMPLE(text, max_len + 1), max_len)
+	// trim(text, N) keeps N-1 chars (copytext to index N), so pass max_len + 1 to cap AT max_len.
+	return trim(STRIP_HTML_SIMPLE(text, max_len + 1), max_len + 1)
 
 /// Fully strip HTML tags and cap length for AI/cyborg laws (prime injection targets).
 /proc/sanitize_persistent_law(text)
 	if(!istext(text))
 		return ""
-	return trim(STRIP_HTML_FULL(text, PERSISTENT_MAX_LAW_LEN + 1), PERSISTENT_MAX_LAW_LEN)
+	return trim(STRIP_HTML_FULL(text, PERSISTENT_MAX_LAW_LEN + 1), PERSISTENT_MAX_LAW_LEN + 1)
 
 // --- Save ------------------------------------------------------------------------------------
 
@@ -71,10 +72,25 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 /// over GLOB.mob_living_list with CHECK_TICK between mobs so we stay tick-safe (design sec 8.7).
 /datum/controller/subsystem/persistence/proc/save_persistent_mobs()
 	var/list/records = list()
+	// ckey -> list("record" = winning record, "live" = whether it had a live mind key). Enforces ONE
+	// mind/ckey record per ckey (see dedup comment below).
+	var/list/mind_holders_by_ckey = list()
 	for(var/mob/living/resident as anything in GLOB.mob_living_list)
-		if(QDELETED(resident) || !is_persistent_level(resident.z) || !is_persistent_type_allowed(resident.type))
+		if(QDELETED(resident) || !is_persistent_type_allowed(resident.type))
 			continue
-		var/list/record = resident.serialize_persistent()
+		// get_turf(): a mob inside a container (body bag, locker, sleeper) has z = 0 and would be
+		// silently dropped by a raw resident.z check - gate on the container's turf instead.
+		var/turf/resident_turf = get_turf(resident)
+		if(!resident_turf || !is_persistent_level(resident_turf.z))
+			continue
+		// One runtiming mob must not abort the whole actor save: replace() would never run and a STALE
+		// persistent_mobs.json (a previous round's actors) would reload against this round's map.
+		var/list/record
+		try
+			record = resident.serialize_persistent()
+		catch(var/exception/error)
+			log_world("PERSISTENT_MAP: failed to serialize [resident.type] at [AREACOORD(resident_turf)]: [error]")
+			continue
 		if(!record)
 			continue
 		// Player carbons persist WITH their mind + a ckey LABEL (private-fork choice, design sec 10.2).
@@ -83,10 +99,23 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		// player currently holds the body, else the stamp left on a dormant (unclaimed) body - so a body
 		// that is never resumed keeps its mind + ckey and stays claimable next round (sec 8.6 step 5).
 		if(iscarbon(resident) && resident.mind)
-			var/owner_ckey = resident.mind.key ? ckey(resident.mind.key) : resident.persistent_owner_ckey
+			var/is_live = !!resident.mind.key
+			var/owner_ckey = is_live ? ckey(resident.mind.key) : resident.persistent_owner_ckey
 			if(owner_ckey)
-				record["ckey"] = owner_ckey
-				record["mind"] = resident.mind.serialize_persistent()
+				// Dedup: only ONE record per ckey carries the mind + claim label (design sec 8.6, "prefer
+				// the most recent"). A live-keyed body (the player is in it right now) beats a dormant
+				// stamped shell; between dormant shells, first wins. Losers are still saved as plain mob
+				// records, so old shells persist physically but stop re-granting antag datums every round
+				// and can't steal the claim from the player's current body.
+				var/list/existing = mind_holders_by_ckey[owner_ckey]
+				if(!existing || (is_live && !existing["live"]))
+					if(existing)
+						var/list/old_record = existing["record"]
+						old_record -= "ckey"
+						old_record -= "mind"
+					record["ckey"] = owner_ckey
+					record["mind"] = resident.mind.serialize_persistent()
+					mind_holders_by_ckey[owner_ckey] = list("record" = record, "live" = is_live)
 		records += list(record)
 		CHECK_TICK
 
@@ -175,14 +204,11 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	if(!body || !claimant?.client)
 		return null
 	claimable_bodies -= target_ckey
-	// Capture prefs before PossessByPlayer moves the client off the claimant.
-	var/datum/preferences/prefs = claimant.client.prefs
+	// Claiming ONLY attaches the client. The persisted identity - name (dna.real_name), flavor text
+	// (dna.features["flavor_text"]), appearance (dna.unique_identity), inventory - was already fully
+	// restored from serialized DNA at load via hardset_dna(). Do NOT apply the client's preferences
+	// here (the old safe_transfer_prefs_to call did): apply_prefs_to() resets dna.features to
+	// MANDATORY_FEATURE_LIST and applies whatever character slot the player has SELECTED in the lobby,
+	// clobbering the persisted name/flavor text with a potentially different character's.
 	body.PossessByPlayer(claimant.client.ckey)
-	// The DMM/JSON layers restore the body (DNA appearance, inventory, damage); the player's character
-	// PREFERENCES restore the identity that lives outside the body - name, flavor text, and prefs-driven
-	// visual customization (item/accessory colouring). visuals_only = TRUE applies those WITHOUT
-	// re-equipping the loadout, so the persisted inventory is left intact. (This is the disconnected-safe
-	// equivalent of how bitrunning dresses an avatar via safe_transfer_prefs_to.)
-	if(prefs && ishuman(body))
-		prefs.safe_transfer_prefs_to(body, visuals_only = TRUE)
 	return body

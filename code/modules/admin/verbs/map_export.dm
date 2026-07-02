@@ -305,7 +305,7 @@ GLOBAL_LIST_INIT(save_file_chars, list(
 						empty = FALSE
 				current_header += "[empty ? "" : ",\n"][place]"
 				//====SAVING ATMOS====
-				if((save_flag & SAVE_TURFS) && (save_flag & SAVE_ATMOS) && !isspaceturf(pull_from))
+				if((save_flag & SAVE_TURFS) && (save_flag & SAVE_ATMOS) && pull_from && !isspaceturf(pull_from)) //SPLURT EDIT CHANGE - PERSISTENT_MAP - pull_from is nulled above for skipped shuttle/space turfs; guard the null before generate_tgm_metadata() derefs it - ORIGINAL: if((save_flag & SAVE_TURFS) && (save_flag & SAVE_ATMOS) && !isspaceturf(pull_from))
 					var/metadata = generate_tgm_metadata(pull_from)
 					current_header += "[metadata]"
 				current_header += ",\n[location])\n"
