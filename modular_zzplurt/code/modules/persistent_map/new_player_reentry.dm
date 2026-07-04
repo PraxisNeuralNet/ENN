@@ -17,12 +17,12 @@
 		return FALSE
 
 	var/body_name = body.real_name || body.name
-	if(tgui_alert(usr, "A persisted body for [body_name] is available. Resume it?\n(Choosing No continues to normal character setup.)", "Resume Persisted Body", list("Resume", "No")) != "Resume")
+	if(tgui_alert(src, "A persisted body for [body_name] is available. Resume it?\n(Choosing No continues to normal character setup.)", "Resume Persisted Body", list("Resume", "No")) != "Resume")
 		return FALSE
 
 	// Re-validate after the blocking prompt  -  the body may have been gibbed or claimed meanwhile.
 	if(!SSpersistence.claim_persistent_body(ckey, src))
-		to_chat(usr, span_warning("That persisted body is no longer available."))
+		to_chat(src, span_warning("That persisted body is no longer available."))
 		return FALSE
 
 	SSticker.queued_players -= src

@@ -4,7 +4,7 @@
 // This is deliberately NOT part of the DMM layer: a living mob is a deep object graph (bodyparts,
 // organs, dna, reagents, a recursive worn/held inventory, a mind) that does not fit map cells, and
 // write_map() explicitly skips carbons. Every value written here is plain JSON; every value read
-// back is validated by the save/load layer (type allowlist, text sanitization, numeric clamps  - 
+// back is validated by the save/load layer (type allowlist, text sanitization, numeric clamps -
 // see persistent_mobs.dm and design sec 8.5).
 
 // =================================================================================================

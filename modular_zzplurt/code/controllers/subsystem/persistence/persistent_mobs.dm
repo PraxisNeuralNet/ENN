@@ -151,6 +151,9 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	if(!ispath(mob_path, /mob/living) || !is_persistent_type_allowed(mob_path))
 		return null
 
+	// Coordinates come off the trust-boundary file - reject non-numbers before locate() sees them.
+	if(!isnum(record["x"]) || !isnum(record["y"]) || !isnum(record["z"]))
+		return null
 	// Body-in-a-hostile-spot guard (design sec 8.6): if the saved turf is gone or no longer a
 	// persistent level, skip rather than spawning into the void. (A future iteration could fall
 	// back to an arrivals spawn instead.)
