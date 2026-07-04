@@ -31,6 +31,11 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		/obj/item,
 		/datum/species,
 		/datum/antagonist,
+		/datum/quirk,
+		// All action types, not just spells, so admin-given/mind-bound abilities round-trip. Some
+		// action types can't be rebuilt from a bare `new path(mind)` - those fail their per-entry
+		// try/catch at restore and log. Add problem subtrees to the denylist rather than narrowing this.
+		/datum/action,
 	))
 
 /// TRUE only if path is in the allowlist and not in the denylist. Used for every restored type.

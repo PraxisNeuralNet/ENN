@@ -10943,6 +10943,7 @@
 #include "modular_zzplurt\code\controllers\subsystem\persistence\persistent_map_save.dm"
 #include "modular_zzplurt\code\controllers\subsystem\persistence\persistent_mobs.dm"
 #include "modular_zzplurt\code\game\objects\effects\decals\persistent_decals.dm"
+#include "modular_zzplurt\code\game\objects\persistent_containers.dm"
 #include "modular_zzplurt\code\modules\persistent_map\mob_serialization.dm"
 #include "modular_zzplurt\code\modules\admin\verbs\persistent_map.dm"
 #include "modular_zzplurt\code\modules\persistent_map\new_player_reentry.dm"

@@ -144,16 +144,8 @@
 			params["cleanable"] ? TRUE : FALSE, \
 			istext(params["desc"]) ? sanitize_persistent_text(params["desc"], PERSISTENT_MAX_LAW_LEN) : null)
 
-/// Walk every persistent z-level and re-apply saved turf decals. Called from
-/// SSpersistence.Initialize() (after mapping + atoms init), alongside the mob actor restore.
-/datum/controller/subsystem/persistence/proc/apply_persistent_turf_decals()
-	for(var/z in 1 to world.maxz)
-		if(!is_persistent_level(z))
-			continue
-		for(var/turf/tile as anything in Z_TURFS(z))
-			if(tile.persistent_turf_decals)
-				tile.apply_persistent_decals()
-			CHECK_TICK
+// (The post-load walk that consumes persistent_turf_decals lives in persistent_containers.dm -
+// SSpersistence.apply_persistent_world_payloads() - since it also restores container contents.)
 
 // --- Crayon graffiti -------------------------------------------------------------------------
 // Base get_save_vars() already saves name, color, icon_state and dir. The drawn colour and

@@ -175,6 +175,12 @@
 			chems += list(list("type" = "[reagent.type]", "volume" = reagent.volume))
 		if(length(chems))
 			.["reagents"] = chems
+	// Quirks (character traits + admin-given ones) - saved by TYPE, re-added through the allowlist.
+	var/list/quirk_types = list()
+	for(var/datum/quirk/quirk as anything in quirks)
+		quirk_types += "[quirk.type]"
+	if(length(quirk_types))
+		.["quirks"] = quirk_types
 
 /mob/living/carbon/deserialize_persistent(list/data)
 	// Species must be rebuilt BEFORE the base pass so bodyparts/organs exist for limb damage (sec 8.3).
@@ -186,6 +192,17 @@
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
 				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+	// Quirks - allowlist-gated; per-quirk try/catch so one broken quirk can't eat the rest.
+	// (add_quirk itself no-ops gracefully if SSquirks isn't ready or the quirk is a duplicate.)
+	if(islist(data["quirks"]))
+		for(var/quirk_text in data["quirks"])
+			var/quirk_path = text2path(quirk_text)
+			if(!ispath(quirk_path, /datum/quirk) || !is_persistent_type_allowed(quirk_path))
+				continue
+			try
+				add_quirk(quirk_path, announce = FALSE)
+			catch(var/exception/quirk_error)
+				log_world("PERSISTENT_MAP: quirk restore ([quirk_path]) failed on [name]: [quirk_error]")
 	// Prefer the SAVED name over dna.real_name: if hardset_dna aborted early (see
 	// restore_persistent_dna), dna.real_name still holds Initialize's random name and reading it
 	// here would clobber the correct name the base pass just applied from the record.
@@ -227,41 +244,69 @@
 	if(ishuman(src))
 		var/mob/living/carbon/human/human = src
 		var/saved_real_name = sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN)
-		// json_encode turns mutation_index's typepath KEYS into strings; rebuild real typepaths
-		// (dropping garbage) so domutcheck() inside hardset_dna gets what it expects.
-		var/list/mutation_index
-		if(islist(dna_data["mutation_index"]))
-			mutation_index = list()
+		var/log_name = saved_real_name || "an unnamed body"
+		// The identity used to be applied through one hardset_dna() call, but a runtime on ANY
+		// json-degraded field aborted the whole proc, silently eating every stage after it - which
+		// is how monkeys (human-typed mobs whose species is what makes them monkeys) restored as
+		// full humans, and names stayed random. Each stage below mirrors hardset_dna's body but is
+		// isolated in its own try/catch with a specific log line, so one bad field costs only its
+		// own stage.
+		// STAGE 1 - species. Applied FIRST (hardset_dna did features first); skipped when the
+		// spawned type already carries the right species (e.g. monkey subtypes) to avoid organ churn.
+		if(species_path && human.dna?.species?.type != species_path)
+			try
+				human.set_species(new species_path, icon_update = FALSE)
+			catch(var/exception/species_error)
+				log_world("PERSISTENT_MAP: species restore ([species_path]) failed for [log_name]: [species_error]")
+		// STAGE 2 - features (flavor text lives in here).
+		if(islist(dna_data["features"]) && human.dna)
+			try
+				human.dna.features = dna_data["features"].Copy()
+				human.dna.generate_unique_features()
+			catch(var/exception/features_error)
+				log_world("PERSISTENT_MAP: features restore failed for [log_name]: [features_error]")
+		// STAGE 3 - blood type.
+		var/datum/blood_type/blood = get_blood_type(dna_data["blood_type"])
+		if(blood)
+			try
+				human.set_blood_type(blood)
+			catch(var/exception/blood_error)
+				log_world("PERSISTENT_MAP: blood-type restore failed for [log_name]: [blood_error]")
+		// STAGE 4 - appearance (unique_identity DNA blocks).
+		if(istext(dna_data["unique_identity"]) && human.dna)
+			try
+				human.dna.unique_identity = dna_data["unique_identity"]
+				human.updateappearance(icon_update = FALSE)
+			catch(var/exception/appearance_error)
+				log_world("PERSISTENT_MAP: appearance restore failed for [log_name]: [appearance_error]")
+		// STAGE 5 - genetic mutations. json turned the typepath keys into strings; rebuild real
+		// typepaths (dropping garbage) so domutcheck() gets what it expects.
+		if(islist(dna_data["mutation_index"]) && human.dna)
+			var/list/mutation_index = list()
 			for(var/mutation_text in dna_data["mutation_index"])
 				var/mutation_path = text2path("[mutation_text]")
 				if(ispath(mutation_path, /datum/mutation))
 					mutation_index[mutation_path] = dna_data["mutation_index"][mutation_text]
-			if(!length(mutation_index))
-				mutation_index = null
-		// hardset_dna applies dna.features FIRST and dna.real_name only later, so if a json-degraded
-		// field runtimes inside it the proc aborts with flavor text applied but the name still
-		// Initialize-random. Contain the abort, log it, and apply the identity manually below.
+			if(length(mutation_index))
+				try
+					human.dna.mutation_index = mutation_index
+					human.dna.default_mutation_genes = mutation_index.Copy()
+					human.domutcheck()
+				catch(var/exception/mutation_error)
+					log_world("PERSISTENT_MAP: mutation restore failed for [log_name]: [mutation_error]")
+		// STAGE 6 - single body rebuild once everything is in place (mirrors hardset_dna's tail).
 		try
-			human.hardset_dna(
-				dna_data["unique_identity"],
-				mutation_index,
-				null, // default_mutation_genes - hardset_dna mirrors mutation_index when null
-				saved_real_name,
-				get_blood_type(dna_data["blood_type"]),
-				species_path ? new species_path : null,
-				islist(dna_data["features"]) ? dna_data["features"].Copy() : null
-			)
-		catch(var/exception/error)
-			log_world("PERSISTENT_MAP: hardset_dna failed while restoring [saved_real_name || "an unnamed body"]: [error]")
-		// hardset_dna sets dna.real_name but NEVER the mob's real_name/name (and may have aborted
-		// before even that) - force all three from the saved value directly.
+			human.update_body(is_creating = TRUE)
+			human.update_mutations_overlay()
+		catch(var/exception/body_error)
+			log_world("PERSISTENT_MAP: body rebuild failed for [log_name]: [body_error]")
+		// STAGE 7 - names + enzymes, applied directly (no stage above can eat these).
 		if(saved_real_name)
 			if(human.dna)
 				human.dna.real_name = saved_real_name
 			human.real_name = saved_real_name
 			human.name = saved_real_name
-		// hardset_dna regenerates unique_enzymes from the name; restore the saved value so forensic
-		// DNA / cloning records round-trip. (No appearance impact - hardset_dna already rebuilt the body.)
+		// Saved enzymes restore last so forensic DNA / cloning records round-trip.
 		if(istext(dna_data["unique_enzymes"]) && human.dna)
 			human.dna.unique_enzymes = dna_data["unique_enzymes"]
 		return
@@ -365,6 +410,18 @@
 		antags += "[antag.type]"
 	if(length(antags))
 		.["antag_datums"] = antags
+	// Mind-bound actions (spells, admin-given abilities, any power granted to the MIND). Actions
+	// with target == the mind follow it between bodies - exactly the set that should persist.
+	// Mob-bound actions (target == the body) are innate/species/item-driven and rebuild themselves;
+	// antag-datum-bound actions (target == the antag datum) are re-granted by the antag datum's
+	// own on_gain() when it is re-added, so neither is captured here.
+	var/list/action_types = list()
+	if(current)
+		for(var/datum/action/action in current.actions)
+			if(action.target == src)
+				action_types += "[action.type]"
+	if(length(action_types))
+		.["actions"] = action_types
 	if(length(known_skills))
 		var/list/skills = list()
 		for(var/skill_path in known_skills)
@@ -388,11 +445,40 @@
 		if(job)
 			set_assigned_role(job)
 	// Antag datums are re-added by TYPE through the allowlist; never instantiate a path from file.
+	// Per-antag try/catch: an antag's on_gain() can runtime against not-yet-ready round state at
+	// init, and without containment that abort silently ate every antag/spell/skill after it -
+	// the "traitor panel grants deleting between rounds" failure mode. Now it costs only itself
+	// and leaves a log line saying exactly which antag type broke.
 	if(islist(data["antag_datums"]))
 		for(var/antag_text in data["antag_datums"])
 			var/antag_path = text2path(antag_text)
-			if(ispath(antag_path, /datum/antagonist) && is_persistent_type_allowed(antag_path) && !has_antag_datum(antag_path))
+			if(!ispath(antag_path, /datum/antagonist) || !is_persistent_type_allowed(antag_path) || has_antag_datum(antag_path))
+				continue
+			try
 				add_antag_datum(antag_path)
+			catch(var/exception/antag_error)
+				log_world("PERSISTENT_MAP: antag restore ([antag_path]) failed on [name]: [antag_error]")
+	// Mind-bound actions - allowlist-gated, duplicate-guarded (skips types the just-restored antag
+	// datums already re-granted), created exactly like the admin "Give Spell" verb does (new action
+	// with the MIND as target, granted to the current body). Per-entry try/catch: some action types
+	// expect constructor args/state a bare `new path(mind)` can't supply - those log and are skipped
+	// instead of breaking the rest of the restore.
+	var/list/action_types = list()
+	if(islist(data["actions"]))
+		action_types += data["actions"]
+	if(islist(data["spells"])) // legacy key from saves made before actions were widened beyond spells
+		action_types += data["spells"]
+	for(var/action_text in action_types)
+		var/action_path = text2path(action_text)
+		if(!ispath(action_path, /datum/action) || !is_persistent_type_allowed(action_path))
+			continue
+		if(current && (locate(action_path) in current.actions))
+			continue
+		try
+			var/datum/action/action = new action_path(src)
+			action.Grant(current)
+		catch(var/exception/action_error)
+			log_world("PERSISTENT_MAP: action restore ([action_path]) failed on [name]: [action_error]")
 	if(islist(data["skills"]))
 		var/list/skills = data["skills"]
 		for(var/skill_text in skills)

@@ -30,3 +30,6 @@
 /// Tighter, semantically-sane cap for a single restored bloodstream reagent volume. Real bloodstream
 /// reagents sit well under this; the lower bound stops a tampered file minting a god-volume chem.
 #define PERSISTENT_MAX_REAGENT_VOLUME 1000
+/// Cap for a single restored ore-silo material amount (units; 100 units = 1 sheet, so this is 10k
+/// sheets per material). Stops a tampered snapshot minting infinite materials.
+#define PERSISTENT_MAX_SILO_MATERIAL 1000000

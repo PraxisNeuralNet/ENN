@@ -59,7 +59,11 @@
 		// them - duplicating every pet/critter on reload. Stripping SAVE_MOBS keeps the split clean.
 		// SAVE_SHUTTLEAREA_IGNORE: do NOT bake shuttles either - SSshuttle respawns them each round from
 		// templates; baked shuttle areas + docking ports would double-register and duplicate (design sec 12.1).
-		var/map_text = write_map(1, 1, z, world.maxx, world.maxy, z, ALL & ~SAVE_MOBS, SAVE_SHUTTLEAREA_IGNORE, obj_blacklist)
+		// SAVE_OBJECT_PROPERTIES is stripped too: its only core user is the ore silo's on_object_saved(),
+		// which vomits the silo's materials as SIBLING sheet stacks in the TGM cell - on reload they pile
+		// up on the silo's turf and get re-saved plus re-vomited every round (compounding). Silo materials
+		// persist properly via persistent_silo_materials instead (persistent_containers.dm).
+		var/map_text = write_map(1, 1, z, world.maxx, world.maxy, z, ALL & ~SAVE_MOBS & ~SAVE_OBJECT_PROPERTIES, SAVE_SHUTTLEAREA_IGNORE, obj_blacklist)
 		if(!map_text)
 			// Abort the WHOLE snapshot rather than skipping the level: a manifest missing a z passes
 			// every load-side validation and would boot an incomplete station with no fallback. Not

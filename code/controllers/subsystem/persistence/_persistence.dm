@@ -80,7 +80,7 @@ SUBSYSTEM_DEF(persistence)
 	load_tram_counter()
 	load_adventures()
 	load_storyteller_type() //BUBBER EDIT ADD - Storyteller
-	apply_persistent_turf_decals() //SPLURT EDIT ADDITION - PERSISTENT_MAP - re-apply saved floor/turf decal elements (see persistent_decals.dm)
+	apply_persistent_world_payloads() //SPLURT EDIT ADDITION - PERSISTENT_MAP - re-apply saved turf decals + container contents (see persistent_containers.dm)
 	load_persistent_mobs() //SPLURT EDIT ADDITION - PERSISTENT_MAP - restore the saved mob actor layer (runs after mapping+atoms init; see design sec 12.9)
 	return SS_INIT_SUCCESS
 
