@@ -23,10 +23,15 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 
 /proc/generate_persistent_type_allowlist()
 	return typecacheof(list(
-		// Mob scope: CARBONS ONLY (player characters, monkeys, etc.). Simple/basic animals and
-		// silicons were deliberately removed from persistence - they do not carry across rounds.
-		// (The silicon serialize/deserialize support in mob_serialization.dm is kept so a deployment
-		// can re-enable them by adding /mob/living/silicon paths back here.)
+		// Mob scope: ALL living mobs on persistent z-levels (re-widened from carbons-only by
+		// request - a persisted station otherwise has no pets/slimes at all, since the DMM layer
+		// excludes mobs and the shipped map never loads). No duplication risk: the JSON layer is
+		// the SOLE owner of mobs (write_map strips SAVE_MOBS), which is what fixed the original
+		// "Renault duplicates and murders himself every reload" bug.
+		/mob/living/basic,
+		/mob/living/simple_animal,
+		/mob/living/silicon/robot,
+		/mob/living/silicon/ai,
 		/mob/living/carbon,
 		/obj/item,
 		/datum/species,

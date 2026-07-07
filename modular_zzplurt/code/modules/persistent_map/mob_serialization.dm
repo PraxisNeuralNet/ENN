@@ -77,15 +77,62 @@
 	if(isstack(src))
 		var/obj/item/stack/stack = src
 		.["amount"] = stack.amount
+	// Player-applied tinting (spraycans etc.) - only saved when it deviates from the type default.
+	if(color != initial(color))
+		if(islist(color))
+			var/list/color_matrix = color
+			.["color"] = color_matrix.Copy()
+		else
+			.["color"] = color
+	// Reagent contents (medipens, beakers, sprays...) - without this a used medipen reloads full.
+	if(reagents)
+		var/list/chems = list()
+		for(var/datum/reagent/reagent as anything in reagents.reagent_list)
+			chems += list(list("type" = "[reagent.type]", "volume" = reagent.volume))
+		.["reagents"] = chems // always present when a reagents holder exists, so EMPTY stays empty
 	// Only recurse into genuine storage so we don't try to "restore" e.g. a PDA's internal parts.
+	// The key is ALWAYS present for storage items (even empty), so an emptied container is
+	// authoritative on restore instead of regenerating its type-default contents.
 	if(atom_storage && depth < PERSISTENT_MAX_RECURSION_DEPTH)
-		var/list/inventory = serialize_persistent_contents(src, depth + 1)
-		if(length(inventory))
-			.["contents"] = inventory
+		.["contents"] = serialize_persistent_contents(src, depth + 1)
 
-/// Type-specific item restore hook. No-op by default; override for items that carry extra state.
+/// Type-specific item restore hook. Base applies color + reagents; override for extra state
+/// (and call ..()).
 /obj/item/proc/deserialize_persistent(list/data, depth = 1)
-	return
+	if(!islist(data))
+		return
+	if(!isnull(data["color"]) && (istext(data["color"]) || islist(data["color"])))
+		color = data["color"]
+	if(islist(data["reagents"]) && reagents)
+		reagents.clear_reagents() // saved contents are authoritative - a used medipen stays used
+		for(var/list/chem as anything in data["reagents"])
+			if(!islist(chem))
+				continue
+			var/chem_path = text2path(chem["type"])
+			if(ispath(chem_path, /datum/reagent))
+				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+
+/// Apply a serialize_persistent() record onto THIS already-existing item in place (the counterpart
+/// to restore_persistent_item(), which creates a new one). Used for items that the map/machinery
+/// respawns itself - SSU slot gear, floor items - so their saved state overwrites type defaults.
+/obj/item/proc/apply_persistent_item_record(list/record)
+	if(!islist(record))
+		return
+	var/clean_name = sanitize_persistent_text(record["name"], PERSISTENT_MAX_NAME_LEN)
+	if(clean_name)
+		name = clean_name
+	if(isstack(src) && isnum(record["amount"]))
+		var/obj/item/stack/stack = src
+		stack.amount = clamp(round(record["amount"]), 1, stack.max_amount)
+	deserialize_persistent(record, 1)
+	var/list/child_contents = record["contents"]
+	if(islist(child_contents) && atom_storage)
+		// Saved contents are authoritative: wipe the type-default population first (no dupes,
+		// and an emptied container stays empty). Snapshot the list - qdel mutates contents.
+		for(var/obj/item/stale in contents.Copy())
+			qdel(stale)
+		for(var/list/child as anything in child_contents)
+			restore_persistent_item(child, src, 2)
 
 // =================================================================================================
 // Shared inventory walk / rebuild
@@ -142,6 +189,11 @@
 
 	var/list/child_contents = item_data["contents"]
 	if(islist(child_contents) && item.atom_storage)
+		// Saved contents are authoritative: wipe the type-default population (a fresh toolbox
+		// spawns its default tools) so restored containers don't dupe - and emptied ones stay
+		// empty. Snapshot the list - qdel mutates contents while we iterate.
+		for(var/obj/item/stale in item.contents.Copy())
+			qdel(stale)
 		for(var/list/child as anything in child_contents)
 			restore_persistent_item(child, item, depth + 1)
 	return item
@@ -181,6 +233,34 @@
 		quirk_types += "[quirk.type]"
 	if(length(quirk_types))
 		.["quirks"] = quirk_types
+	// Character voice: vocal bloopers ("barks") + TTS voice/pitch. These normally apply ONLY from
+	// client prefs at spawn - which persisted bodies deliberately never receive (prefs would clobber
+	// the persisted identity with the lobby-selected slot) - so they must ride the record instead.
+	var/list/voice_data = list()
+	if(blooper)
+		voice_data["blooper"] = blooper.id
+	voice_data["blooper_speed"] = blooper_speed
+	voice_data["blooper_pitch"] = blooper_pitch
+	voice_data["blooper_pitch_range"] = blooper_pitch_range
+	if(voice)
+		voice_data["tts_voice"] = voice
+	if(pitch)
+		voice_data["tts_pitch"] = pitch
+	.["voice"] = voice_data
+	// Internal organs (incl. cybernetics/species organs) - ALWAYS present so a removed organ stays
+	// removed. External organs (tails etc.) are excluded; species/features own those.
+	var/list/organ_types = list()
+	for(var/obj/item/organ/organ as anything in organs)
+		if(organ.organ_flags & ORGAN_EXTERNAL)
+			continue
+		organ_types += "[organ.type]"
+	.["organs"] = organ_types
+	// Implants (mindshield, tracking, storage...) by type.
+	var/list/implant_types = list()
+	for(var/obj/item/implant/implanted as anything in implants)
+		implant_types += "[implanted.type]"
+	if(length(implant_types))
+		.["implants"] = implant_types
 
 /mob/living/carbon/deserialize_persistent(list/data)
 	// Species must be rebuilt BEFORE the base pass so bodyparts/organs exist for limb damage (sec 8.3).
@@ -192,6 +272,68 @@
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
 				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+	// Character voice - bloopers resolve through the SSblooper singleton registry (nothing is ever
+	// instantiated from the file); the TTS voice is validated against the configured speaker list,
+	// mirroring the failsafe the preference itself uses.
+	var/list/voice_data = data["voice"]
+	if(islist(voice_data))
+		if(istext(voice_data["blooper"]))
+			var/datum/blooper/saved_blooper = SSblooper.blooper_list[voice_data["blooper"]]
+			if(saved_blooper)
+				blooper = saved_blooper
+			else
+				log_world("PERSISTENT_MAP: unknown blooper id '[voice_data["blooper"]]' on [name]; vocal barks not restored.")
+		if(isnum(voice_data["blooper_speed"]))
+			blooper_speed = clamp(voice_data["blooper_speed"], 0, 100)
+		if(isnum(voice_data["blooper_pitch"]))
+			blooper_pitch = clamp(voice_data["blooper_pitch"], 0, 100)
+		if(isnum(voice_data["blooper_pitch_range"]))
+			blooper_pitch_range = clamp(voice_data["blooper_pitch_range"], 0, 100)
+		if(istext(voice_data["tts_voice"]) && (!SStts.tts_enabled || (voice_data["tts_voice"] in SStts.available_speakers)))
+			voice = voice_data["tts_voice"]
+		if(isnum(voice_data["tts_pitch"]))
+			pitch = clamp(voice_data["tts_pitch"], -100, 100)
+	// Internal organs - reconcile the spawned (species-default) set against the saved set:
+	// remove organs that were cut out/replaced, insert saved ones that are missing (cybernetics
+	// round-trip). Per-organ try/catch; external organs never touched.
+	if(islist(data["organs"]))
+		var/list/saved_organs = list()
+		for(var/organ_text in data["organs"])
+			var/organ_path = text2path(organ_text)
+			if(ispath(organ_path, /obj/item/organ) && is_persistent_type_allowed(organ_path))
+				saved_organs[organ_path] = TRUE
+		for(var/obj/item/organ/organ as anything in organs.Copy())
+			if(organ.organ_flags & ORGAN_EXTERNAL)
+				continue
+			if(saved_organs[organ.type])
+				saved_organs -= organ.type // already present, don't re-add
+				continue
+			try
+				organ.Remove(src, special = TRUE)
+				qdel(organ)
+			catch(var/exception/organ_remove_error)
+				log_world("PERSISTENT_MAP: organ removal ([organ]) failed on [name]: [organ_remove_error]")
+		for(var/organ_path in saved_organs)
+			try
+				var/obj/item/organ/new_organ = new organ_path()
+				if(!new_organ.Insert(src, special = TRUE))
+					qdel(new_organ)
+			catch(var/exception/organ_error)
+				log_world("PERSISTENT_MAP: organ restore ([organ_path]) failed on [name]: [organ_error]")
+	// Implants - re-implanted through the real implant() proc (force, silent), duplicate-guarded.
+	if(islist(data["implants"]))
+		for(var/implant_text in data["implants"])
+			var/implant_path = text2path(implant_text)
+			if(!ispath(implant_path, /obj/item/implant) || !is_persistent_type_allowed(implant_path))
+				continue
+			if(locate(implant_path) in implants)
+				continue
+			try
+				var/obj/item/implant/new_implant = new implant_path()
+				if(!new_implant.implant(src, silent = TRUE, force = TRUE))
+					qdel(new_implant)
+			catch(var/exception/implant_error)
+				log_world("PERSISTENT_MAP: implant restore ([implant_path]) failed on [name]: [implant_error]")
 	// Quirks - allowlist-gated; per-quirk try/catch so one broken quirk can't eat the rest.
 	// (add_quirk itself no-ops gracefully if SSquirks isn't ready or the quirk is a duplicate.)
 	if(islist(data["quirks"]))
@@ -253,6 +395,13 @@
 		// own stage.
 		// STAGE 1 - species. Applied FIRST (hardset_dna did features first); skipped when the
 		// spawned type already carries the right species (e.g. monkey subtypes) to avoid organ churn.
+		// CONTAMINATION GUARD: saves written by pre-fix builds can carry species = human for
+		// monkey-typed mobs (the old humanization bug re-saved its own damage). A monkey-typed mob
+		// with saved human species is always that contamination, never legit - keep it a monkey.
+		// (Fully cleaning old damage still needs a data/persistent_mobs.json reset.)
+		if(species_path == /datum/species/human && istype(src, /mob/living/carbon/human/species/monkey))
+			log_world("PERSISTENT_MAP: ignored contaminated human-species record for monkey [saved_real_name || name]; reset data/persistent_mobs.json to clear old damage.")
+			species_path = null
 		if(species_path && human.dna?.species?.type != species_path)
 			try
 				human.set_species(new species_path, icon_update = FALSE)
