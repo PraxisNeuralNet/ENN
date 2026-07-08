@@ -5,6 +5,30 @@
 	/// TRUE while a persistent snapshot save is in flight. Guards BOTH the map and actor layers so a
 	/// future periodic saver can't interleave writes with the round-end save (design sec 12.7).
 	var/map_saving = FALSE
+	/// Sidecar payload collector for the z-level currently being written by write_map(). Non-null
+	/// ONLY during a persistent snapshot pass - get_save_vars() overrides check this before
+	/// registering payloads, so a vanilla admin map export never collects anything. Nested record
+	/// payloads must ride this sidecar, never TGM vars: the DMM reader corrupts nested list
+	/// literals (design sec 12.12 / PERSISTENT_MAP_BUGS.md sec 0).
+	var/list/payload_collector
+
+/// Register a nested payload for the atom currently being serialized by write_map(). No-ops
+/// outside a persistent snapshot pass. Coordinates come from the atom's turf so contained/
+/// component sources resolve to a locatable tile at load time.
+/datum/controller/subsystem/persistence/proc/collect_persistent_payload(atom/source, kind, list/data)
+	if(isnull(payload_collector) || !istype(source) || !islist(data) || !length(data))
+		return
+	var/turf/location = get_turf(source)
+	if(!location)
+		return
+	payload_collector += list(list(
+		"x" = location.x,
+		"y" = location.y,
+		"kind" = kind,
+		// Matched against objects on the tile at load time; turf-kind entries ignore it.
+		"type" = "[source.type]",
+		"data" = data,
+	))
 
 /// Coherent snapshot entry point: writes the DMM map layer AND the JSON actor layer under a single
 /// guard, so the two layers describe the same moment and reload together. This is what the round-end
@@ -33,11 +57,11 @@
 	write_persistent_map_files()
 	map_saving = FALSE
 
-/// Serializes every persistent z-level (Station only in v1) to one TGM .dmm file each, then
-/// writes the manifest LAST as the commit marker. Returns TRUE if the manifest was committed.
-/// write_map() is internally CHECK_TICK-throttled and we CHECK_TICK between levels, so the pass
-/// spreads safely across many ticks and never freezes the server. NOTE: this is the guard-free
-/// worker - callers (above) own the map_saving guard.
+/// Serializes every persistent z-level (Station only) to one TGM .dmm file + one payload sidecar
+/// JSON each, then writes the manifest LAST as the commit marker. Returns TRUE if the manifest was
+/// committed. write_map() is internally CHECK_TICK-throttled and we CHECK_TICK between levels, so
+/// the pass spreads safely across many ticks and never freezes the server. NOTE: this is the
+/// guard-free worker - callers (above) own the map_saving guard.
 /datum/controller/subsystem/persistence/proc/write_persistent_map_files()
 	var/list/manifest = list(
 		"version" = PERSISTENT_MAP_VERSION,
@@ -57,13 +81,45 @@
 		// Save everything EXCEPT mobs. Actors are owned by the JSON layer (design sec 9), and write_map
 		// would otherwise bake simple animals into the DMM while save_persistent_mobs() also serializes
 		// them - duplicating every pet/critter on reload. Stripping SAVE_MOBS keeps the split clean.
-		// SAVE_SHUTTLEAREA_IGNORE: do NOT bake shuttles either - SSshuttle respawns them each round from
-		// templates; baked shuttle areas + docking ports would double-register and duplicate (design sec 12.1).
+		// SAVE_SHUTTLEAREA_IGNORE (BUG #7 v3): shuttles are template-spawned every round (CentCom
+		// json docks + station roundstart_template docks), and a BAKED mobile docking port can never
+		// function - register() is only ever called by action_load/variant LateInitializes, so a
+		// baked shuttle loads as inert scenery with a dead console (the v2 DONTCARE failure). So
+		// shuttle-area turfs are nooped and fresh shuttles land each round. The one thing IGNORE
+		// destroys that must survive is any STATION stationary dock occluded by a docked shuttle at
+		// save time (this was v1's actual fleet-erasure mechanism) - those are captured below as
+		// stationary_dock payloads and recreated after load.
 		// SAVE_OBJECT_PROPERTIES is stripped too: its only core user is the ore silo's on_object_saved(),
 		// which vomits the silo's materials as SIBLING sheet stacks in the TGM cell - on reload they pile
 		// up on the silo's turf and get re-saved plus re-vomited every round (compounding). Silo materials
 		// persist properly via persistent_silo_materials instead (persistent_containers.dm).
+		payload_collector = list()
 		var/map_text = write_map(1, 1, z, world.maxx, world.maxy, z, ALL & ~SAVE_MOBS & ~SAVE_OBJECT_PROPERTIES, SAVE_SHUTTLEAREA_IGNORE, obj_blacklist)
+		// Stationary docks sitting under a docked shuttle live on shuttle-area turfs, which the
+		// IGNORE pass just nooped - write_map never even visited them, so their get_save_vars()
+		// could not run. Capture them directly; the walk recreates any that are missing (BUG #7).
+		for(var/obj/docking_port/stationary/dock as anything in SSshuttle.stationary_docking_ports)
+			var/turf/dock_turf = get_turf(dock)
+			if(!dock_turf || dock_turf.z != z || !istype(get_area(dock), /area/shuttle))
+				continue
+			collect_persistent_payload(dock, PERSISTENT_PAYLOAD_STATIONARY_DOCK, list(
+				"type" = "[dock.type]",
+				"name" = dock.name,
+				"dir" = dock.dir,
+				"shuttle_id" = dock.shuttle_id,
+				"width" = dock.width,
+				"height" = dock.height,
+				"dwidth" = dock.dwidth,
+				"dheight" = dock.dheight,
+				// Usually a painted PATH; random docks assign a template DATUM - save its type so
+				// text2path round-trips either way (load_roundstart works from a path via initial()).
+				"roundstart_template" = ispath(dock.roundstart_template) ? "[dock.roundstart_template]" : (dock.roundstart_template ? "[dock.roundstart_template.type]" : null),
+				// The dock's own area (NOT the occluding shuttle's): area_type was captured at the
+				// dock's original Initialize, before any shuttle landed on it.
+				"area_type" = dock.area_type ? "[dock.area_type]" : null,
+			))
+		var/list/level_payloads = payload_collector
+		payload_collector = null
 		if(!map_text)
 			// Abort the WHOLE snapshot rather than skipping the level: a manifest missing a z passes
 			// every load-side validation and would boot an incomplete station with no fallback. Not
@@ -80,14 +136,35 @@
 		fdel(final_path)
 		rustg_file_write(map_text, final_path)
 
+		// Sidecar payload file for this level (nested container/decal/item records - design sec
+		// 12.12). Written BEFORE the manifest so the commit marker covers it; same .bak rotation.
+		// Always written (even with zero entries) so the manifest reference is always satisfiable.
+		var/payload_name = "payloads_z[z].json"
+		var/payload_path = "[PERSISTENT_MAP_DIR]/[payload_name]"
+		fdel("[payload_path].bak")
+		if(fexists(payload_path))
+			fcopy(payload_path, "[payload_path].bak")
+		fdel(payload_path)
+		rustg_file_write(json_encode(list("version" = PERSISTENT_PAYLOAD_VERSION, "entries" = level_payloads)), payload_path)
+
 		ordinal_by_role[role] = (ordinal_by_role[role] || 0) + 1
 		manifest["levels"] += list(list(
 			"role" = role,
 			"ordinal" = ordinal_by_role[role],
 			"file" = "z[z].dmm",
+			"payloads" = payload_name,
 			// Stored verbatim and re-applied on load so Up/Down multi-z linkage survives (design sec 5.2).
 			"traits" = SSmapping.z_list[z]?.traits,
 		))
+		// Fleet inventory: mobile shuttle ids present on this level at save time. Purely
+		// informational - shuttles respawn from templates each round; the reconcile pass compares
+		// this against the fresh fleet and logs anything that failed to come back (BUG #7).
+		var/list/shuttle_ids = list()
+		for(var/obj/docking_port/mobile/port as anything in SSshuttle.mobile_docking_ports)
+			if(port.z == z && port.shuttle_id != "emergency" && port.shuttle_id != "backup")
+				shuttle_ids += port.shuttle_id
+		var/list/last_level = manifest["levels"][length(manifest["levels"])]
+		last_level["shuttles"] = shuttle_ids
 		CHECK_TICK
 
 	// Never clobber a good manifest with an empty one (no persistent levels found - shouldn't happen,

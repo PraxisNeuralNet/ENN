@@ -34,6 +34,9 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		/mob/living/silicon/ai,
 		/mob/living/carbon,
 		/obj/item,
+		// Closets/crates: needed for cargo-shelf crate restoration (BUG #8); their item contents
+		// still restore through the /obj/item pipeline individually.
+		/obj/structure/closet,
 		/datum/species,
 		/datum/antagonist,
 		/datum/quirk,
@@ -77,6 +80,11 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	/// (persistent_owner_ckey survives a mind going keyless). Lets save_persistent_mobs() keep
 	/// re-tagging an UNCLAIMED body so it stays claimable across rounds indefinitely (design sec 8.6 step 5).
 	var/persistent_owner_ckey
+
+/mob/living/carbon
+	/// TRUE when this body was restored from a record with no saved voice data (pre-voice-format
+	/// save), so the claim path should heal its voice from the connecting client's prefs (BUG #6).
+	var/persistent_needs_voice_prefs = FALSE
 
 /// Serialize every persistent, allowlisted living mob to data/persistent_mobs.json. Single pass
 /// over GLOB.mob_living_list with CHECK_TICK between mobs so we stay tick-safe (design sec 8.7).
@@ -148,9 +156,22 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	var/list/records = data["mobs"]
 	if(!islist(records))
 		return
+	var/restored = 0
 	for(var/list/record as anything in records)
-		restore_persistent_mob(record)
+		// Per-record containment (BUG #5): one bad record's runtime used to abort this whole loop,
+		// silently costing every mob after it - including players' claimable bodies.
+		try
+			if(restore_persistent_mob(record))
+				restored++
+		catch(var/exception/record_error)
+			log_world("PERSISTENT_MAP: mob record ([islist(record) ? json_encode(record["type"]) : "malformed"]) failed to restore: [record_error]")
 		CHECK_TICK
+	// One-glance boot summary (report #5 diagnosis): if a player's resume offer doesn't appear,
+	// this line says whether their ckey ever got a claimable body this boot.
+	var/list/claim_ckeys = list()
+	for(var/claim_ckey in claimable_bodies)
+		claim_ckeys += claim_ckey
+	log_world("PERSISTENT_MAP: actor restore complete - [restored]/[length(records)] mobs restored, [length(claim_ckeys)] claimable bodies ([claim_ckeys.Join(", ") || "none"]).")
 
 /// Spawn and rehydrate a single saved mob. Returns the mob, or null if the record was rejected
 /// (bad/forbidden type, or a saved location that no longer exists).
@@ -172,24 +193,38 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		return null
 
 	var/mob/living/body = new mob_path(spawn_turf)
-	body.deserialize_persistent(record)
 
-	// Player carbon: rebuild a DORMANT mind (no client/key) and index it for the opt-in offer.
+	// Stamp + register the claim FIRST - it needs only the ckey and a spawned body. A runtime
+	// ANYWHERE in the physical or mind restore below must never cost the player their lobby offer
+	// (BUG #5: registration used to sit after the body deserialize, so any restore runtime -
+	// guaranteed while the container/DNA bugs raged - silently ate the claim).
+	var/claim_ckey
+	if(iscarbon(body) && islist(record["mind"]) && record["ckey"])
+		claim_ckey = ckey(record["ckey"])
+		// The stamp keeps the body's mind + claimability when re-saved unclaimed (sec 8.6 step 5).
+		body.persistent_owner_ckey = claim_ckey
+		register_claimable_body(claim_ckey, body)
+
+	// Physical restore, contained: a degraded-but-claimable body beats no body.
+	try
+		body.deserialize_persistent(record)
+	catch(var/exception/body_error)
+		log_world("PERSISTENT_MAP: physical restore of [body.type] at [AREACOORD(spawn_turf)] partially failed: [body_error]")
+
+	// Player carbon: rebuild a DORMANT mind (no client/key) for the opt-in offer.
 	// transfer_to() onto a clientless body leaves the mind keyless, so it is an inert NPC carrying a
 	// dormant mind  -  exactly the non-authoritative reconstruction the design specifies (sec 8.6 step 2).
-	if(iscarbon(body) && islist(record["mind"]) && record["ckey"])
-		// Stamp the owner ckey so the body keeps its mind + claimability when re-saved unclaimed (sec 8.6 step 5).
-		body.persistent_owner_ckey = ckey(record["ckey"])
+	if(claim_ckey)
 		var/datum/mind/dormant = new /datum/mind(null)
 		// Attach to the body FIRST so antag datums see a current mob when re-added. The mind keeps a
-		// null key and active = FALSE, so transfer_to() does NOT PossessByPlayer  -  the body stays an
-		// inert clientless NPC carrying a dormant mind, exactly as sec 8.6 requires.
+		// null key and active = FALSE, so transfer_to() does NOT PossessByPlayer.
 		dormant.transfer_to(body)
-		// Register the claimable body BEFORE restoring mind contents. Re-adding antag datums at init
-		// can runtime (their on_gain may touch not-yet-ready state), which would abort this proc - so
-		// registering first guarantees the body is offerable in the lobby regardless of mind-restore issues.
-		register_claimable_body(ckey(record["ckey"]), body)
-		dormant.deserialize_persistent(record["mind"])
+		// Mind-content restore contained too: re-adding antag datums at init can runtime (their
+		// on_gain may touch not-yet-ready state); that must cost only the broken antag, never the claim.
+		try
+			dormant.deserialize_persistent(record["mind"])
+		catch(var/exception/mind_error)
+			log_world("PERSISTENT_MAP: mind restore for [claim_ckey]'s body partially failed: [mind_error]")
 
 	return body
 
@@ -211,12 +246,25 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	return body
 
 /// The ONLY place control transfers: move the connecting client into the dormant body and consume
-/// the one-shot claim so it can't be double-claimed (design sec 8.6 step 4).
+/// the one-shot claim so it can't be double-claimed (design sec 8.6 step 4). Mirrors the canonical
+/// latejoin teardown (new_player.transfer_character()): possess, stop lobby music, area callback,
+/// crew-joined signal.
 /datum/controller/subsystem/persistence/proc/claim_persistent_body(target_ckey, mob/claimant)
 	var/mob/living/body = get_claimable_body(target_ckey)
 	if(!body || !claimant?.client)
+		log_world("PERSISTENT_MAP: claim for [target_ckey] failed ([body ? "claimant lost client" : "body gone/invalid"]).")
 		return null
 	claimable_bodies -= target_ckey
+	// Voice heal (report #6, broadened): apply the connecting client's VOICE prefs whenever the
+	// record predated voice serialization OR the restored voice didn't stick (null/unresolved
+	// blooper - clientless Initialize rolls a random one, but a failed registry lookup leaves it
+	// in an untrusted state). Voice prefs ONLY - never the full prefs, which clobber the
+	// persisted identity (see below).
+	if(iscarbon(body))
+		var/mob/living/carbon/carbon_body = body
+		if(carbon_body.persistent_needs_voice_prefs || isnull(carbon_body.blooper))
+			carbon_body.persistent_needs_voice_prefs = FALSE
+			apply_persistent_voice_prefs(claimant.client, carbon_body)
 	// Claiming ONLY attaches the client. The persisted identity - name (dna.real_name), flavor text
 	// (dna.features["flavor_text"]), appearance (dna.unique_identity), inventory - was already fully
 	// restored from serialized DNA at load via hardset_dna(). Do NOT apply the client's preferences
@@ -224,4 +272,38 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	// MANDATORY_FEATURE_LIST and applies whatever character slot the player has SELECTED in the lobby,
 	// clobbering the persisted name/flavor text with a potentially different character's.
 	body.PossessByPlayer(claimant.client.ckey)
+	log_world("PERSISTENT_MAP: [target_ckey] resumed persisted body [body.real_name || body.name].")
+	body.stop_sound_channel(CHANNEL_LOBBYMUSIC)
+	var/area/joined_area = get_area(body)
+	joined_area?.on_joining_game(body)
+	if(body.mind?.assigned_role)
+		SEND_GLOBAL_SIGNAL(COMSIG_GLOB_CREWMEMBER_JOINED, body, body.mind.assigned_role.title)
 	return body
+
+/// Apply ONLY the client's voice preferences (vocal blooper + TTS) onto a resumed body whose
+/// record predated voice persistence. Reads the same preference datums spawn uses; identity/
+/// appearance prefs are deliberately never touched here.
+/datum/controller/subsystem/persistence/proc/apply_persistent_voice_prefs(client/player, mob/living/carbon/body)
+	var/datum/preferences/prefs = player?.prefs
+	if(!prefs || !istype(body))
+		return
+	var/blooper_key = prefs.read_preference(/datum/preference/choiced/blooper)
+	if(blooper_key && length(SSblooper.blooper_list))
+		var/datum/blooper/pref_blooper = SSblooper.blooper_list[blooper_key]
+		if(pref_blooper)
+			body.blooper = pref_blooper
+	var/pref_speed = prefs.read_preference(/datum/preference/numeric/blooper_speed)
+	if(isnum(pref_speed))
+		body.blooper_speed = clamp(pref_speed, 0, 100)
+	var/pref_pitch = prefs.read_preference(/datum/preference/numeric/blooper_pitch)
+	if(isnum(pref_pitch))
+		body.blooper_pitch = clamp(pref_pitch, 0, 100)
+	var/pref_pitch_range = prefs.read_preference(/datum/preference/numeric/blooper_pitch_range)
+	if(isnum(pref_pitch_range))
+		body.blooper_pitch_range = clamp(pref_pitch_range, 0, 100)
+	var/pref_voice = prefs.read_preference(/datum/preference/choiced/voice)
+	if(pref_voice && (!SStts.tts_enabled || (pref_voice in SStts.available_speakers)))
+		body.voice = pref_voice
+	var/pref_tts_pitch = prefs.read_preference(/datum/preference/numeric/tts_voice_pitch)
+	if(isnum(pref_tts_pitch))
+		body.pitch = clamp(pref_tts_pitch, -100, 100)

@@ -28,6 +28,12 @@
 			- typecacheof(list(/obj/effect/decal, /obj/effect/turf_decal, /obj/effect/landmark))
 		// Extension point: junk we never want to freeze into the station snapshot.
 		blacklist += typecacheof(list(/obj/effect/decal/cleanable/blood/gibs, /obj/effect/decal/remains))
+		// ALL mobile docking ports are excluded (BUG #7 v3): shuttles are template-spawned every
+		// round, and a baked mobile port can never function - register() is only called by
+		// action_load/variant LateInitializes, so a snapshotted port loads as an inert object
+		// with a dead console. Shuttle-area turfs are already nooped by SAVE_SHUTTLEAREA_IGNORE;
+		// this covers any port caught outside a shuttle area mid-operation.
+		blacklist += typecacheof(list(/obj/docking_port/mobile))
 	return blacklist
 
 /// Parsed, validated persistent-map manifest. Only ever constructed by load_persistent_manifest(),
@@ -38,7 +44,7 @@
 	/// world.maxx / world.maxy the snapshot was taken at (load is size-locked to these).
 	var/saved_maxx
 	var/saved_maxy
-	/// Ordered level records: list("role", "ordinal", "file", "traits", "staged_file").
+	/// Ordered level records: list("role", "ordinal", "file", "payloads", "traits", "shuttles", "staged_file").
 	var/list/levels = list()
 
 /// All level records for a role, in saved order (the save loop emits ascending ordinals).

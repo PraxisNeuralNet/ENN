@@ -17,7 +17,9 @@
 		return FALSE
 
 	var/body_name = body.real_name || body.name
+	log_world("PERSISTENT_MAP: offering persisted body [body_name] to [ckey].")
 	if(tgui_alert(src, "A persisted body for [body_name] is available. Resume it?\n(Choosing No continues to normal character setup.)", "Resume Persisted Body", list("Resume", "No")) != "Resume")
+		log_world("PERSISTENT_MAP: [ckey] declined the persisted-body offer.")
 		return FALSE
 
 	// Re-validate after the blocking prompt  -  the body may have been gibbed or claimed meanwhile.

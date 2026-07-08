@@ -1,24 +1,26 @@
-// Persistent map - shuttle round-trip support (BUG #7 / retracted design sec 12.1).
+// Persistent map - shuttle round-trip support (BUG #7, v3 architecture).
 //
-// Mapped-in station shuttles (arrivals, mining, labor, and json_key-loaded ones like cargo/ferry)
-// are part of the station map, NOT respawned by SSshuttle each round - so the persistent snapshot
-// now SAVES shuttle areas (SAVE_SHUTTLEAREA_DONTCARE) and this file closes the two gaps that
-// creates:
-//   1. Docked shuttles are baked into the snapshot, so the roundstart template loader must not
-//      double-spawn onto an occupied dock (load_roundstart guard below).
-//   2. A shuttle that was IN TRANSIT at save time is absent from the snapshot; the round-start
-//      reconciliation pass respawns it from a matching template at its home dock, or logs loudly
-//      when it can't.
-// The emergency shuttle (and its backup) stays template-spawned at CentCom and is excluded from
-// snapshots via persistent_obj_blacklist.
+// Shuttles are TEMPLATE-SPAWNED every round and are never baked into snapshots:
+//   - CentCom json_key docks spawn the map-config fleet (cargo/ferry/emergency/whiteship) -
+//     CentCom is never persisted, so that path is untouched by persistence.
+//   - Station roundstart_template docks (mining, labor, aux base, escape pods) spawn their own
+//     shuttles via setup_shuttles()/LateInitialize.
+//   - A BAKED mobile docking port can never function: register() is only called by action_load
+//     and per-variant LateInitializes, so a snapshotted port loads as inert scenery with a dead
+//     console (the v2 DONTCARE failure).
+// The snapshot therefore noops shuttle-area turfs (SAVE_SHUTTLEAREA_IGNORE) and blacklists all
+// mobile ports; the one persistence-owned job is preserving STATION STATIONARY DOCKS that were
+// occluded by a docked shuttle at save time (v1's actual fleet-erasure mechanism) - captured as
+// stationary_dock payloads and recreated by the payload walk (persistent_containers.dm), after
+// which the docks fully self-manage their registration and roundstart spawns.
 
 // NOTE: this intentionally supersedes core's /obj/docking_port/stationary/load_roundstart()
 // (modular overrides are included last and win - same pattern as the button get_save_vars
 // override). The core body is replicated below the persistent-load guard.
 /obj/docking_port/stationary/load_roundstart()
-	// PERSISTENT GUARD: when the persistent station snapshot loaded, a mapped shuttle may already
-	// be baked onto this dock - spawning the roundstart template on top of it would duplicate
-	// (the exact failure the retracted design sec 12.1 feared). An occupied dock needs no spawn.
+	// PERSISTENT GUARD: never template-spawn onto a dock that already holds a shuttle. With the
+	// v3 architecture this should not occur (no shuttles are baked), but it hardens reboot edge
+	// cases and double-setup calls (a recreated dock's LateInitialize AND a late SSshuttle pass).
 	if(SSmapping.persistent_station_loaded && get_docked())
 		return
 	// --- core body, replicated verbatim ---
@@ -35,11 +37,11 @@
 	if(shuttle_template_id)
 		SSshuttle.action_load(shuttle_template_id, src)
 
-/// Round-start audit + best-effort heal for the persisted fleet: every mobile shuttle id the
-/// manifest expected but SSshuttle doesn't have (it was mid-transit at save time, so the snapshot
-/// couldn't bake it) is respawned from a template whose port_id matches, at that port's dock -
-/// or logged RED for manual admin recovery. Runs at round start so SSshuttle setup (including the
-/// json_key roundstart loads, which already heal their own empty docks) has fully finished.
+/// Round-start fleet AUDIT: compare the mobile shuttle ids the manifest recorded at save time
+/// against what actually spawned this round, and red-alert anything missing so an admin can
+/// intervene (shuttle manager). No auto-spawning here - docks self-manage their roundstart loads;
+/// a missing shuttle means its dock failed to recreate or its template failed to load, both of
+/// which need eyes, not another silent code path.
 /datum/controller/subsystem/persistence/proc/reconcile_persistent_shuttles()
 	var/list/expected = SSmapping.persistent_expected_shuttles
 	if(!SSmapping.persistent_station_loaded || !islist(expected) || !length(expected))
@@ -47,21 +49,12 @@
 	var/list/present = list()
 	for(var/obj/docking_port/mobile/port as anything in SSshuttle.mobile_docking_ports)
 		present[port.shuttle_id] = TRUE
+	var/missing = 0
 	for(var/expected_id in expected)
 		if(!istext(expected_id) || present[expected_id])
 			continue
-		// Missing from the world: it was in transit when the snapshot was written. Try a template
-		// whose port_id matches the lost shuttle's id, docked at that same-id stationary port.
-		var/datum/map_template/shuttle/replacement
-		for(var/template_key in SSmapping.shuttle_templates)
-			var/datum/map_template/shuttle/candidate = SSmapping.shuttle_templates[template_key]
-			if(candidate.port_id == expected_id)
-				replacement = candidate
-				break
-		var/obj/docking_port/stationary/home_dock = replacement ? SSshuttle.getDock(replacement.port_id) : null
-		if(!replacement || !istype(home_dock) || home_dock.get_docked())
-			log_world("PERSISTENT_MAP: RED ALERT - shuttle '[expected_id]' was lost in transit at save time and could not be auto-respawned ([replacement ? "dock missing/occupied" : "no matching template"]). Spawn it manually via the shuttle manager.")
-			message_admins("PERSISTENT_MAP: shuttle '[expected_id]' was lost with the persistent snapshot and needs manual respawning (shuttle manager).")
-			continue
-		log_world("PERSISTENT_MAP: respawning in-transit-at-save shuttle '[expected_id]' from template [replacement.shuttle_id] at dock [home_dock.shuttle_id].")
-		SSshuttle.action_load(replacement, home_dock)
+		missing++
+		log_world("PERSISTENT_MAP: RED ALERT - shuttle '[expected_id]' existed at save time but did not respawn this round (dock missing or template load failed). Check earlier PERSISTENT_MAP dock lines; spawn manually via the shuttle manager if needed.")
+		message_admins("PERSISTENT_MAP: shuttle '[expected_id]' failed to respawn this round - check the world log.")
+	if(!missing)
+		log_world("PERSISTENT_MAP: shuttle fleet audit clean - all [length(expected)] expected shuttles present.")

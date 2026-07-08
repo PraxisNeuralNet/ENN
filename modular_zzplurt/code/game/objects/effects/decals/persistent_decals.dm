@@ -22,6 +22,7 @@
 /obj/effect/decal/cleanable/blood
 	/// Transient snapshot of forensic blood DNA (dna_string -> blood_type id). Populated during
 	/// get_save_vars(), serialized into the map, then consumed and cleared on the next maploaded init.
+	/// Flat assoc of scalars - DMM-safe (design sec 12.12).
 	var/list/persistent_blood_dna
 
 /obj/effect/decal/cleanable/blood/get_save_vars()
@@ -55,32 +56,51 @@
 	persistent_blood_dna = null
 	if(!length(resolved))
 		return
+	// Blood TYPES attach elements (e.g. oil's easy_ignite) in set_up_blood(), and add_blood_DNA()
+	// re-runs that setup per entry even for types already on the decal - which re-registered the
+	// element signals and spammed duplicate-signal warnings every boot (BUGS log anomaly L3, core
+	// itself notes the double-set-up). So: replace the DNA data, but only run full setup for blood
+	// types init didn't already configure.
+	var/list/already_set_up = list()
+	var/list/current_dna = GET_ATOM_BLOOD_DNA(src)
+	for(var/dna_string in current_dna)
+		already_set_up[current_dna[dna_string]] = TRUE
 	if(forensics)
 		forensics.wipe_blood_DNA() // drop the random init DNA so only the restored forensics remain
-	add_blood_DNA(resolved)
+	var/list/data_only = list() // types init already set up: swap the dna strings, skip re-setup
+	var/list/needs_setup = list() // types new to this decal: full add (colour/element setup)
+	for(var/dna_string in resolved)
+		if(already_set_up[resolved[dna_string]])
+			data_only[dna_string] = resolved[dna_string]
+		else
+			needs_setup[dna_string] = resolved[dna_string]
+	if(length(data_only))
+		if(!forensics)
+			forensics = new(src)
+		forensics.add_blood_DNA(data_only)
+	if(length(needs_setup))
+		add_blood_DNA(needs_setup)
 
 // --- Floor/turf decals (mapped + painted tile decals) ------------------------------------------
 // Mapped /obj/effect/turf_decal objects convert themselves into /datum/element/decal on the turf
 // and self-delete during init, and painter/RTD/buildmode decals are elements from the start - so
 // at save time there is NO object for write_map() to see, and floor decals silently vanished from
-// snapshots. Mechanism (mirrors the blood-DNA snapshot var above): get_save_vars() collects the
-// turf's decal elements via COMSIG_ATOM_DECALS_ROTATING (the same collection signal shuttle
-// rotation uses) into a saved list var; after a persistent load,
-// SSpersistence.apply_persistent_turf_decals() re-adds them as elements and clears the var.
+// snapshots. Mechanism: get_save_vars() collects the turf's decal elements via
+// COMSIG_ATOM_DECALS_ROTATING (the same collection signal shuttle rotation uses) into payload
+// records on the SIDECAR (the records are a list-of-lists, which the DMM reader corrupts - design
+// sec 12.12 / BUGS sec 0; this is why decals silently didn't persist), after a persistent load,
+// apply_persistent_world_payloads() re-adds them as elements.
 // Re-adding an identical decal is safe: decal elements are bespoke (keyed by args), so duplicates
 // collapse into the same element instance.
 // LIMITATION: only DIRECTIONAL decal elements register the collection signal. Every floor-decal
 // source (turf_decal init, decal painter, RTD, buildmode) passes a direction, so tile decals are
 // covered; dir-less decal elements (e.g. item blood overlays) are not, and don't need to be.
 
-/turf
-	/// Transient snapshot of this turf's decal elements (list of param lists). Populated during
-	/// get_save_vars(), serialized into the TGM cell, consumed + nulled after a persistent load.
-	var/list/persistent_turf_decals
-
 /// Core only defines get_save_vars() at /atom and /turf/open, so /turf is a free modular hook.
 /// Broken/burnt floor damage is saved here too: those vars live on /turf/open, whose own
 /// get_save_vars() is a core proc we can't re-override - but it ..()s into this one.
+/// Decal records are a list-of-lists, which the DMM reader CORRUPTS (design sec 12.12 / BUGS
+/// sec 0 - this is why decals silently didn't persist), so they ride the payload sidecar.
 /turf/get_save_vars()
 	. = ..()
 	if(isopenturf(src))
@@ -91,17 +111,19 @@
 			. += NAMEOF(open_turf, broken)
 		if(open_turf.burnt != initial(open_turf.burnt))
 			. += NAMEOF(open_turf, burnt)
-	persistent_turf_decals = null
 	var/list/datum/element/decal/decals = list()
 	SEND_SIGNAL(src, COMSIG_ATOM_DECALS_ROTATING, decals)
 	if(!length(decals))
 		return .
-	persistent_turf_decals = list()
+	var/list/decal_records = list()
 	for(var/datum/element/decal/decal as anything in decals)
 		// A same-dir call returns the decal's CURRENT parameters (rotation of 0).
 		var/list/params = decal.get_rotated_parameters(dir, dir)
-		persistent_turf_decals += list(list(
-			"icon" = params["icon"], // icon file: tgm_encode emits 'icons/....dmi', the maploader parses it back into a file
+		decal_records += list(list(
+			// Icon files can't ride JSON; stored as the file's text path and re-resolved through
+			// the icons/-prefix validation below - the same coercion the DMM reader itself uses
+			// for file literals, but stricter.
+			"icon" = "[params["icon"]]",
 			"icon_state" = params["icon_state"],
 			"dir" = params["dir"],
 			// Normalize the z-offset plane back to its true value; Attach re-offsets for the new z.
@@ -113,22 +135,30 @@
 			"cleanable" = params["cleanable"],
 			"desc" = params["desc"],
 		))
-	. += NAMEOF(src, persistent_turf_decals)
+	SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_TURF_DECALS, decal_records)
 	return .
 
-/// Re-add this turf's saved decal elements (from a loaded snapshot) and clear the snapshot var.
-/// Values came off a trust-boundary file: the icon must be a REAL parsed icon/file literal (never
-/// text coerced into a path), and the description is sanitized before it can reach examine.
-/turf/proc/apply_persistent_decals()
-	var/list/decals = persistent_turf_decals
-	persistent_turf_decals = null
+/// Resolve a payload icon path back into a file. Trust-boundary text: only bundled icon assets
+/// (icons/**.dmi, no traversal) may resolve - the same file() coercion the DMM reader applies to
+/// file literals, but restricted to the icon tree so a tampered payload can't read data/config.
+/proc/persistent_decal_icon(icon_text)
+	if(!istext(icon_text) || findtext(icon_text, ".."))
+		return null
+	if(copytext(icon_text, 1, 7) != "icons/" || copytext(icon_text, -4) != ".dmi")
+		return null
+	return file(icon_text)
+
+/// Re-add this turf's saved decal elements from a payload record list (sidecar-driven).
+/// Values came off a trust-boundary file: icons resolve through persistent_decal_icon(), and the
+/// description is sanitized before it can reach examine.
+/turf/proc/apply_persistent_decals(list/decals)
 	if(!islist(decals))
 		return
 	for(var/list/params as anything in decals)
 		if(!islist(params))
 			continue
-		var/decal_icon = params["icon"]
-		if(!isicon(decal_icon) && !isfile(decal_icon))
+		var/decal_icon = persistent_decal_icon(params["icon"])
+		if(!decal_icon)
 			continue
 		if(!istext(params["icon_state"]))
 			continue
@@ -144,7 +174,7 @@
 			params["cleanable"] ? TRUE : FALSE, \
 			istext(params["desc"]) ? sanitize_persistent_text(params["desc"], PERSISTENT_MAX_LAW_LEN) : null)
 
-// (The post-load walk that consumes persistent_turf_decals lives in persistent_containers.dm -
+// (The post-load walk that consumes turf-decal payloads lives in persistent_containers.dm -
 // SSpersistence.apply_persistent_world_payloads() - since it also restores container contents.)
 
 // --- Crayon graffiti -------------------------------------------------------------------------

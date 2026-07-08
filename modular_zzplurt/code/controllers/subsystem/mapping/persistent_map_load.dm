@@ -2,6 +2,18 @@
 // whitelisted _maps/custom/ directory, and loads each role group through the existing LoadGroup
 // path. See PERSISTENT_MAP_DESIGN.md sec 5, sec 13.5.
 
+/datum/controller/subsystem/mapping
+	/// TRUE once the persistent station snapshot has actually been loaded this boot (NOT merely
+	/// present on disk). Gates load-time reconciliation like the docked-shuttle roundstart guard.
+	var/persistent_station_loaded = FALSE
+	/// Sidecar payload filenames in station-load order (index = station ordinal), recorded when the
+	/// persistent group loads so SSpersistence.apply_persistent_world_payloads() can map each file
+	/// to the z-level its level record actually landed on. Filenames only - already traversal-checked.
+	var/list/persistent_loaded_payloads
+	/// Mobile shuttle ids the snapshot expected per the manifest fleet inventory, consumed by the
+	/// round-start shuttle reconciliation pass (BUG #7).
+	var/list/persistent_expected_shuttles
+
 /// Reads and validates the on-disk manifest. Returns a /datum/persistent_map_manifest only when
 /// the snapshot is fully trustworthy; otherwise returns null so the caller falls back to shipped
 /// maps. Every failure is logged loudly  -  a corrupt snapshot must never brick boot (design sec 5.2).
@@ -50,11 +62,22 @@
 		if(!fexists("[PERSISTENT_MAP_DIR]/[file_name]"))
 			log_world("PERSISTENT_MAP: missing snapshot file [PERSISTENT_MAP_DIR]/[file_name]; discarding snapshot.")
 			return null
+		// Sidecar payload file (nested container/decal/item records - design sec 12.12). Same trust
+		// checks as the .dmm: traversal guard + must exist. The save always writes one per level.
+		var/payload_name = record["payloads"]
+		if(!istext(payload_name) \
+			|| findtext(payload_name, "/") || findtext(payload_name, "\\") || findtext(payload_name, "..") \
+			|| !fexists("[PERSISTENT_MAP_DIR]/[payload_name]"))
+			log_world("PERSISTENT_MAP: missing/suspicious payload file reference '[payload_name]'; discarding snapshot.")
+			return null
 		manifest.levels += list(list(
 			"role" = record["role"],
 			"ordinal" = record["ordinal"],
 			"file" = file_name,
+			"payloads" = payload_name,
 			"traits" = islist(record["traits"]) ? record["traits"] : null,
+			// Fleet inventory for round-start shuttle reconciliation (BUG #7); optional.
+			"shuttles" = islist(record["shuttles"]) ? record["shuttles"] : null,
 		))
 
 	return manifest
@@ -106,4 +129,15 @@
 		traits = null
 
 	LoadGroup(error_list, group_name, CUSTOM_MAP_PATH, files, traits, default_traits, height_autosetup = height_autosetup)
+
+	// Record what actually loaded so the post-init passes can act on it: payload files in load
+	// order (consumed by SSpersistence.apply_persistent_world_payloads(), matched to persistent
+	// z-levels by ordinal) and the expected fleet (consumed by shuttle reconciliation - BUG #7).
+	persistent_station_loaded = TRUE
+	persistent_loaded_payloads = list()
+	persistent_expected_shuttles = list()
+	for(var/list/record as anything in records)
+		persistent_loaded_payloads += record["payloads"]
+		if(islist(record["shuttles"]))
+			persistent_expected_shuttles |= record["shuttles"]
 	return TRUE

@@ -128,8 +128,15 @@
 	var/list/child_contents = record["contents"]
 	if(islist(child_contents) && atom_storage)
 		// Saved contents are authoritative: wipe the type-default population first (no dupes,
-		// and an emptied container stays empty). Snapshot the list - qdel mutates contents.
-		for(var/obj/item/stale in contents.Copy())
+		// and an emptied container stays empty). SAFETY VALVE (BUGS #2/#3): never wipe on a
+		// record list that can't restore anything - data loss requires a trustworthy record.
+		// STORAGE-AWARE (BUG #1): wipe only the storage's real location, never raw contents
+		// (a MOD control's raw contents are its PARTS; qdeling one self-destructs the suit).
+		if(!persistent_records_restorable(child_contents))
+			log_world("PERSISTENT_MAP: untrustworthy contents record for [src]; keeping existing contents.")
+			return
+		var/atom/storage_loc = persistent_storage_location(src)
+		for(var/obj/item/stale in storage_loc.contents.Copy())
 			qdel(stale)
 		for(var/list/child as anything in child_contents)
 			restore_persistent_item(child, src, 2)
@@ -139,7 +146,9 @@
 // =================================================================================================
 
 /// Collect item records for everything held/worn (a mob) or stored (a container). Worn body parts,
-/// abstract items and prosthetics are excluded by get_equipped_items()'s defaults.
+/// abstract items and prosthetics are excluded by get_equipped_items()'s defaults. Containers are
+/// STORAGE-AWARE (BUG #1): only items in the storage datum's real_location are captured - never a
+/// MOD control's parts/core/modules, which live in its raw contents.
 /proc/serialize_persistent_contents(atom/container, depth)
 	. = list()
 	if(depth > PERSISTENT_MAX_RECURSION_DEPTH)
@@ -149,7 +158,8 @@
 		var/mob/mob_container = container
 		items = mob_container.get_equipped_items(INCLUDE_HELD)
 	else
-		items = container.contents
+		var/atom/storage_loc = persistent_storage_location(container)
+		items = storage_loc.contents
 	for(var/obj/item/thing in items)
 		var/list/record = thing.serialize_persistent(depth)
 		if(record)
@@ -191,11 +201,16 @@
 	if(islist(child_contents) && item.atom_storage)
 		// Saved contents are authoritative: wipe the type-default population (a fresh toolbox
 		// spawns its default tools) so restored containers don't dupe - and emptied ones stay
-		// empty. Snapshot the list - qdel mutates contents while we iterate.
-		for(var/obj/item/stale in item.contents.Copy())
-			qdel(stale)
-		for(var/list/child as anything in child_contents)
-			restore_persistent_item(child, item, depth + 1)
+		// empty. SAFETY VALVE + STORAGE-AWARE, same as apply_persistent_item_record (BUGS #1-#3):
+		// never wipe on an unrestorable record, and only ever wipe the real storage location.
+		if(persistent_records_restorable(child_contents))
+			var/atom/storage_loc = persistent_storage_location(item)
+			for(var/obj/item/stale in storage_loc.contents.Copy())
+				qdel(stale)
+			for(var/list/child as anything in child_contents)
+				restore_persistent_item(child, item, depth + 1)
+		else
+			log_world("PERSISTENT_MAP: untrustworthy contents record for restored [item]; keeping default contents.")
 	return item
 
 // =================================================================================================
@@ -205,17 +220,28 @@
 /mob/living/carbon/serialize_persistent()
 	. = ..()
 	if(dna)
-		.["dna"] = list(
-			"species" = "[dna.species?.type]",
-			// unique_identity encodes the VISIBLE character (hair, eye/skin colour, etc.) as DNA blocks;
-			// without it a restored body keeps Initialize's random look. mutation_index carries genes.
-			"unique_identity" = dna.unique_identity,
-			"mutation_index" = dna.mutation_index?.Copy(),
-			"unique_enzymes" = dna.unique_enzymes,
-			"blood_type" = dna.blood_type?.id,
-			"real_name" = dna.real_name,
-			"features" = dna.features?.Copy(),
-		)
+		// Monkeys get a MINIMAL dna record (report #4): saving human-format appearance blocks/
+		// features/mutations for a monkey is what seeded the "humonkey" contamination cycle, and
+		// the restore side never applies them for monkeys anyway.
+		if(istype(src, /mob/living/carbon/human/species/monkey))
+			.["dna"] = list(
+				"species" = "[dna.species?.type]",
+				"unique_enzymes" = dna.unique_enzymes,
+				"blood_type" = dna.blood_type?.id,
+				"real_name" = dna.real_name,
+			)
+		else
+			.["dna"] = list(
+				"species" = "[dna.species?.type]",
+				// unique_identity encodes the VISIBLE character (hair, eye/skin colour, etc.) as DNA blocks;
+				// without it a restored body keeps Initialize's random look. mutation_index carries genes.
+				"unique_identity" = dna.unique_identity,
+				"mutation_index" = dna.mutation_index?.Copy(),
+				"unique_enzymes" = dna.unique_enzymes,
+				"blood_type" = dna.blood_type?.id,
+				"real_name" = dna.real_name,
+				"features" = dna.features?.Copy(),
+			)
 	var/list/limbs = list()
 	for(var/obj/item/bodypart/part as anything in bodyparts)
 		limbs += list(list("zone" = part.body_zone, "brute" = part.brute_dam, "burn" = part.burn_dam))
@@ -262,7 +288,20 @@
 	if(length(implant_types))
 		.["implants"] = implant_types
 
+/// TRUE when this is a monkey-typed mob whose saved dna record carries a non-monkey species -
+/// always old-save contamination (BUG #4), never legit. Gates every identity-application site.
+/mob/living/carbon/proc/is_contaminated_monkey_record(list/dna_data)
+	if(!istype(src, /mob/living/carbon/human/species/monkey) || !islist(dna_data))
+		return FALSE
+	var/species_path = text2path(dna_data["species"])
+	return !ispath(species_path, /datum/species/monkey)
+
 /mob/living/carbon/deserialize_persistent(list/data)
+	// Contamination check FIRST: the spawn-time name must survive every later application site
+	// (base pass name, dna real_name, epilogue) when the record's identity is untrustworthy.
+	var/contaminated_monkey = is_contaminated_monkey_record(data["dna"])
+	var/spawn_name = name
+	var/spawn_real_name = real_name
 	// Species must be rebuilt BEFORE the base pass so bodyparts/organs exist for limb damage (sec 8.3).
 	restore_persistent_dna(data["dna"])
 	. = ..()
@@ -275,7 +314,13 @@
 	// Character voice - bloopers resolve through the SSblooper singleton registry (nothing is ever
 	// instantiated from the file); the TTS voice is validated against the configured speaker list,
 	// mirroring the failsafe the preference itself uses.
+	// BUG #6: records saved before voice serialization existed have no "voice" key at all - the
+	// body then keeps the RANDOM voice clientless-Initialize rolled, and (since resumed bodies
+	// never receive prefs) the player was stuck with it forever, re-saved every round. Flag such
+	// bodies so the claim path heals them from the connecting client's voice prefs.
 	var/list/voice_data = data["voice"]
+	if(!islist(voice_data))
+		persistent_needs_voice_prefs = TRUE
 	if(islist(voice_data))
 		if(istext(voice_data["blooper"]))
 			var/datum/blooper/saved_blooper = SSblooper.blooper_list[voice_data["blooper"]]
@@ -348,6 +393,14 @@
 	// Prefer the SAVED name over dna.real_name: if hardset_dna aborted early (see
 	// restore_persistent_dna), dna.real_name still holds Initialize's random name and reading it
 	// here would clobber the correct name the base pass just applied from the record.
+	// CONTAMINATED MONKEY (BUG #4): the record's name is baked damage - re-assert the spawn name
+	// over anything the base pass applied and never touch it with record data.
+	if(contaminated_monkey)
+		name = spawn_name
+		real_name = spawn_real_name
+		if(dna)
+			dna.real_name = spawn_real_name
+		return
 	var/list/dna_data = data["dna"]
 	var/saved_real_name = islist(dna_data) ? sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN) : null
 	if(saved_real_name)
@@ -371,11 +424,9 @@
 /// Rebuild species + full dna identity (appearance included) from a saved dna sub-record.
 /// Species path is allowlist-gated; an un-allowed/garbage species falls back to the spawned body.
 ///
-/// For humans we use hardset_dna() - the canonical "set all DNA at once and rebuild the body" proc -
-/// so unique_identity (appearance), mutation_index, species, features, blood, and name are restored
-/// together and the body is re-rendered, instead of keeping Initialize's random look. (For a LIVE
-/// player, bitrunning copies the character via prefs.safe_transfer_prefs_to(); a persisted body is
-/// disconnected, so we reconstruct from the serialized DNA instead.)
+/// For humans we use hardset_dna()-equivalent STAGES - each isolated in its own try/catch with a
+/// specific log line, so one bad field costs only its own stage (see the monkey-humanization
+/// post-mortem in PERSISTENT_MAP_CHANGELOG.md sixth pass).
 /mob/living/carbon/proc/restore_persistent_dna(list/dna_data)
 	if(!islist(dna_data))
 		return
@@ -387,21 +438,36 @@
 		var/mob/living/carbon/human/human = src
 		var/saved_real_name = sanitize_persistent_text(dna_data["real_name"], PERSISTENT_MAX_NAME_LEN)
 		var/log_name = saved_real_name || "an unnamed body"
-		// The identity used to be applied through one hardset_dna() call, but a runtime on ANY
-		// json-degraded field aborted the whole proc, silently eating every stage after it - which
-		// is how monkeys (human-typed mobs whose species is what makes them monkeys) restored as
-		// full humans, and names stayed random. Each stage below mirrors hardset_dna's body but is
-		// isolated in its own try/catch with a specific log line, so one bad field costs only its
-		// own stage.
+		// MONKEYS TAKE THE LIGHT PATH, ALWAYS (report #4, categorical fix): monkeys are
+		// human-TYPED mobs, and running the human DNA-block pipeline on them (features,
+		// unique_identity appearance blocks, mutation domutcheck, update_body) is exactly what
+		// produced "humonkeys" - even from CLEAN records, since the pipeline applies human-format
+		// appearance data to a monkey body. A monkey has no player-authored appearance worth that
+		// fidelity: restore ONLY forensics (blood type + enzymes) and, for clean records, the name
+		// (Pun Pun stays Pun Pun). Contaminated records (non-monkey saved species - the old bug's
+		// baked damage) additionally never touch the name; the spawn name is re-asserted by
+		// deserialize_persistent's epilogue.
+		if(istype(src, /mob/living/carbon/human/species/monkey))
+			if(is_contaminated_monkey_record(dna_data))
+				log_world("PERSISTENT_MAP: contaminated non-monkey dna record for monkey-typed mob [log_name]; forensics-only restore, name kept from spawn.")
+			var/datum/blood_type/monkey_blood = get_blood_type(dna_data["blood_type"])
+			if(monkey_blood)
+				try
+					human.set_blood_type(monkey_blood)
+				catch(var/exception/monkey_blood_error)
+					log_world("PERSISTENT_MAP: blood-type restore failed for monkey [log_name]: [monkey_blood_error]")
+			if(istext(dna_data["unique_enzymes"]) && human.dna)
+				human.dna.unique_enzymes = dna_data["unique_enzymes"]
+			// Clean records keep their saved name (applied here since the staged pipeline below
+			// is skipped); contaminated ones fall through to the epilogue's spawn-name re-assert.
+			if(saved_real_name && !is_contaminated_monkey_record(dna_data))
+				if(human.dna)
+					human.dna.real_name = saved_real_name
+				human.real_name = saved_real_name
+				human.name = saved_real_name
+			return
 		// STAGE 1 - species. Applied FIRST (hardset_dna did features first); skipped when the
-		// spawned type already carries the right species (e.g. monkey subtypes) to avoid organ churn.
-		// CONTAMINATION GUARD: saves written by pre-fix builds can carry species = human for
-		// monkey-typed mobs (the old humanization bug re-saved its own damage). A monkey-typed mob
-		// with saved human species is always that contamination, never legit - keep it a monkey.
-		// (Fully cleaning old damage still needs a data/persistent_mobs.json reset.)
-		if(species_path == /datum/species/human && istype(src, /mob/living/carbon/human/species/monkey))
-			log_world("PERSISTENT_MAP: ignored contaminated human-species record for monkey [saved_real_name || name]; reset data/persistent_mobs.json to clear old damage.")
-			species_path = null
+		// spawned type already carries the right species to avoid organ churn.
 		if(species_path && human.dna?.species?.type != species_path)
 			try
 				human.set_species(new species_path, icon_update = FALSE)
@@ -460,7 +526,7 @@
 			human.dna.unique_enzymes = dna_data["unique_enzymes"]
 		return
 
-	// Non-human carbons (e.g. monkeys) have no DNA-block appearance; restore the basics directly.
+	// Non-human carbons have no DNA-block appearance; restore the basics directly.
 	if(species_path)
 		set_species(new species_path)
 	if(!dna)
@@ -477,9 +543,6 @@
 
 // =================================================================================================
 // Silicon  -  cyborg & AI (model/cell + laws, design sec 8.3)
-// NOTE: silicons are NOT currently in the persistence allowlist (carbons only - see
-// generate_persistent_type_allowlist() in persistent_mobs.dm). This support code is kept so a
-// deployment can re-enable them by allowlisting /mob/living/silicon paths again.
 // =================================================================================================
 
 /mob/living/silicon/serialize_persistent()

@@ -1,41 +1,59 @@
-// Persistent map - container contents (closets, suit storage units, ore silo) + the world payload
-// restore walk. See PERSISTENT_MAP_DESIGN.md sec 12.4 (container contents gap).
+// Persistent map - container contents (closets, suit storage units, ore silo, cargo shelves),
+// machine part tiers, MOD loadouts, door state, occluded docks, and the world payload restore walk.
+// See PERSISTENT_MAP_DESIGN.md sec 12.4 (container contents gap) and sec 12.12 (payload sidecar).
 //
 // write_map() only serializes DIRECT turf contents, so anything stored INSIDE a container was lost
-// on reload, while the container itself (saved by type) regenerated its roundstart loot - deleting
-// player-stored items and duplicating default gear every round. The fixes here follow the same
-// snapshot-var mechanism as blood DNA and turf decals: state is captured into saved vars during
-// get_save_vars(), written into the TGM cell, and consumed after load.
+// on reload, while the container itself (saved by type) regenerated its roundstart loot.
+//
+// SIDECAR RULE (design sec 12.12 / PERSISTENT_MAP_BUGS.md sec 0): the DMM reader CANNOT parse
+// nested list literals, so nested record payloads are NEVER written as TGM vars. Instead,
+// get_save_vars() overrides register them with SSpersistence.collect_persistent_payload() (a
+// no-op outside a persistent snapshot pass), the save writes them to a per-level
+// payloads_z<N>.json, and apply_persistent_world_payloads() re-applies them by coordinate after
+// load. Only FLAT vars (scalars, flat string lists, flat assoc lists of scalars) may ride the DMM.
 
 // =================================================================================================
-// Generic container item payload
+// Shared helpers
 // =================================================================================================
 
-/obj
-	/// Persistent-map snapshot of this container's item contents (list of item records produced by
-	/// serialize_persistent()). Written by get_save_vars() overrides below, consumed + nulled by
-	/// SSpersistence.apply_persistent_world_payloads() after a persistent load.
-	var/list/persistent_contents
+/// The atom whose contents are this container's actual STORED items. For storage-datum items this
+/// is the storage's real_location (e.g. a MOD suit's storage module - NOT the control unit, whose
+/// raw contents are its parts/core/modules; qdeling those self-destructs the suit, BUG #1). For
+/// everything else (closets, crates) it is the container itself.
+/proc/persistent_storage_location(atom/container)
+	var/datum/storage/storage = container.atom_storage
+	if(storage && storage.real_location)
+		return storage.real_location
+	return container
 
-/// Recreate this container's saved items (allowlist-gated, depth-bounded, names sanitized - all
-/// enforced by restore_persistent_item) and clear the snapshot var.
-/obj/proc/apply_persistent_contents()
-	var/list/records = persistent_contents
-	persistent_contents = null
-	if(!islist(records))
-		return
-	for(var/list/item_data as anything in records)
-		restore_persistent_item(item_data, src, 1)
-
-/// Snapshot every item directly inside container into a list of serialize_persistent() records.
-/// Returns null when there is nothing to save.
+/// Snapshot every stored item inside container into a list of serialize_persistent() records.
+/// Storage-aware: only items in the container's real storage location are captured, never
+/// internal machinery like MOD parts. Returns null when there is nothing to save.
 /proc/serialize_persistent_container_items(atom/container)
 	var/list/records = list()
-	for(var/obj/item/thing in container)
+	var/atom/storage_loc = persistent_storage_location(container)
+	for(var/obj/item/thing in storage_loc.contents)
 		var/list/record = thing.serialize_persistent(2)
 		if(record)
 			records += list(record)
 	return length(records) ? records : null
+
+/// Safety valve for the "saved contents are authoritative" wipes (BUGS #2/#3): a wipe may only
+/// run when the record list is TRUSTWORTHY - explicitly empty (a deliberately emptied container)
+/// or containing at least one restorable item record. A garbage/corrupt list must never trigger
+/// a wipe that then restores nothing.
+/proc/persistent_records_restorable(list/records)
+	if(!islist(records))
+		return FALSE
+	if(!length(records))
+		return TRUE // authoritative empty
+	for(var/list/entry in records)
+		if(!islist(entry))
+			continue
+		var/entry_path = text2path(entry["type"])
+		if(ispath(entry_path, /obj/item) && is_persistent_type_allowed(entry_path))
+			return TRUE
+	return FALSE
 
 // =================================================================================================
 // Closets / crates / lockers
@@ -50,12 +68,19 @@
 	. += NAMEOF(src, contents_initialized)
 	. += NAMEOF(src, welded)
 	. += NAMEOF(src, locked)
-	// Actual stored items ride a snapshot var; restored by apply_persistent_world_payloads().
-	// (Only reached for opened closets - unopened ones have no contents to snapshot yet.)
-	persistent_contents = serialize_persistent_container_items(src)
-	if(persistent_contents)
-		. += NAMEOF(src, persistent_contents)
+	// Actual stored items ride the payload sidecar (nested records - sec 12.12), restored by
+	// apply_persistent_world_payloads(). No-op outside a persistent snapshot pass.
+	SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_CONTENTS, serialize_persistent_container_items(src))
 	return .
+
+/// Recreate this container's saved items (allowlist-gated, depth-bounded, names sanitized - all
+/// enforced by restore_persistent_item). Existing contents are NOT wiped here: closets reload
+/// with contents_initialized latched, so there are no type-default items to clear.
+/obj/proc/apply_persistent_contents(list/records)
+	if(!islist(records))
+		return
+	for(var/list/item_data as anything in records)
+		restore_persistent_item(item_data, src, 1)
 
 // =================================================================================================
 // Suit storage units
@@ -64,8 +89,8 @@
 /// SSUs spawn their contents from the *_type vars in Initialize(). Rewriting those vars to the
 /// CURRENT occupants (or null when a slot was emptied) makes the reloaded unit regenerate exactly
 /// what it held instead of its roundstart defaults - which both duplicated default gear and
-/// deleted whatever was actually stored. Item identity persists; internal item state (e.g. MOD
-/// charge) resets, which is acceptable for suit storage.
+/// deleted whatever was actually stored. The *_type vars are flat typepaths (DMM-safe); the full
+/// per-slot state records ride the payload sidecar.
 /obj/machinery/suit_storage_unit/get_save_vars()
 	. = ..()
 	suit_type = suit?.type
@@ -78,9 +103,8 @@
 	. += NAMEOF(src, mask_type)
 	. += NAMEOF(src, mod_type)
 	. += NAMEOF(src, storage_type)
-	// Full per-slot records ride along too, so slot items keep their STATE (a bag's contents, a
-	// MOD's loadout, custom colours), applied onto the freshly-spawned slot items after load.
-	persistent_contents = null
+	// Full per-slot records so slot items keep their STATE (a bag's contents, a MOD's loadout,
+	// custom colours), applied onto the freshly-spawned slot items after load.
 	var/list/slot_records = list()
 	if(suit)
 		slot_records["suit"] = suit.serialize_persistent(2)
@@ -93,15 +117,12 @@
 	if(storage)
 		slot_records["storage"] = storage.serialize_persistent(2)
 	if(length(slot_records))
-		persistent_contents = slot_records
-		. += NAMEOF(src, persistent_contents)
+		SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_SSU_SLOTS, slot_records)
 	return .
 
 /// SSU payloads are per-slot records applied IN PLACE onto the items Initialize() spawned from the
-/// rewritten *_type vars - unlike the generic version, nothing new is created here.
-/obj/machinery/suit_storage_unit/apply_persistent_contents()
-	var/list/slot_records = persistent_contents
-	persistent_contents = null
+/// rewritten *_type vars - unlike the generic contents path, nothing new is created here.
+/obj/machinery/suit_storage_unit/proc/apply_persistent_ssu_slots(list/slot_records)
 	if(!islist(slot_records))
 		return
 	suit?.apply_persistent_item_record(slot_records["suit"])
@@ -111,7 +132,70 @@
 	storage?.apply_persistent_item_record(slot_records["storage"])
 
 // =================================================================================================
-// Ore silo materials
+// Cargo shelves (BUG #8)
+// =================================================================================================
+// Crates on a shelf live in the shelf's raw contents (forceMoved in), which write_map() never
+// sees - shelved crates and everything inside them silently vanished from snapshots. Each crate
+// snapshot carries its slot index, latch state, and item records; restore replicates load()'s
+// placement (layer/offset/slot bookkeeping) without its do_after/user interaction.
+
+/obj/structure/cargo_shelf/get_save_vars()
+	. = ..()
+	var/list/crate_records = list()
+	for(var/slot in 1 to length(shelf_contents))
+		var/obj/structure/closet/crate/crate = shelf_contents[slot]
+		if(!istype(crate))
+			continue
+		crate_records += list(list(
+			"slot" = slot,
+			"type" = "[crate.type]",
+			"name" = crate.name,
+			"contents_initialized" = crate.contents_initialized,
+			"contents" = serialize_persistent_container_items(crate) || list(),
+		))
+	if(length(crate_records))
+		SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_SHELF_CRATES, crate_records)
+	return .
+
+/// Rebuild saved crates into their shelf slots. Crate types are allowlist-gated; item contents go
+/// through the normal restore pipeline; placement mirrors load()'s slot math.
+/obj/structure/cargo_shelf/proc/apply_persistent_shelf_crates(list/crate_records)
+	if(!islist(crate_records) || !islist(shelf_contents))
+		return
+	for(var/list/record as anything in crate_records)
+		if(!islist(record))
+			continue
+		var/crate_path = text2path(record["type"])
+		if(!ispath(crate_path, /obj/structure/closet/crate) || !is_persistent_type_allowed(crate_path))
+			log_world("PERSISTENT_MAP: rejected shelf crate type [record["type"]] on [src] at [AREACOORD(src)].")
+			continue
+		var/slot = record["slot"]
+		if(!isnum(slot) || slot < 1 || slot > length(shelf_contents) || shelf_contents[slot])
+			slot = shelf_contents.Find(null)
+			if(!slot)
+				log_world("PERSISTENT_MAP: no free shelf slot for restored crate on [src] at [AREACOORD(src)].")
+				continue
+		var/obj/structure/closet/crate/crate = new crate_path(drop_location())
+		var/clean_name = sanitize_persistent_text(record["name"], PERSISTENT_MAX_NAME_LEN)
+		if(clean_name)
+			crate.name = clean_name
+		// Latch BEFORE restoring items so an opened crate doesn't regenerate roundstart loot later.
+		if(!isnull(record["contents_initialized"]))
+			crate.contents_initialized = !!record["contents_initialized"]
+		crate.apply_persistent_contents(record["contents"])
+		// Mirror load()'s placement (minus the user interaction).
+		crate.interaction_flags_atom |= INTERACT_ATOM_MOUSEDROP_IGNORE_ADJACENT
+		shelf_contents[slot] = crate
+		crate.forceMove(src)
+		crate.pixel_y = 10 * (slot - 1) // DEFAULT_SHELF_VERTICAL_OFFSET is file-local to shelf.dm
+		if(slot >= 3)
+			crate.layer = ABOVE_MOB_LAYER + 0.02 * (slot - 1)
+		else
+			crate.layer = BELOW_OBJ_LAYER + 0.02 * (slot - 1)
+	handle_visuals()
+
+// =================================================================================================
+// Ore silo materials (flat assoc "typepath" -> amount: DMM-safe, stays a saved var)
 // =================================================================================================
 
 /obj/machinery/ore_silo
@@ -158,7 +242,7 @@
 			holder.insert_amount_mat(min(amount, PERSISTENT_MAX_SILO_MATERIAL), mat)
 
 // =================================================================================================
-// Machine part upgrades (stock parts / tiers)
+// Machine part upgrades (flat string list: DMM-safe, stays a saved var)
 // =================================================================================================
 
 /obj/machinery
@@ -231,7 +315,7 @@
 		RefreshParts()
 
 // =================================================================================================
-// Buttons -> blast door linkage
+// Buttons -> blast door linkage (flat vars: DMM-safe, unchanged)
 // =================================================================================================
 // The door side needs nothing: core /obj/machinery/door/poddoor/get_save_vars() already saves id.
 // The button side is the gap: the linkage lives in a control assembly INSIDE the button (device),
@@ -255,28 +339,52 @@
 	return .
 
 // =================================================================================================
-// Doors - emag/broken state
+// Doors - full semantic state (BUG #9)
 // =================================================================================================
+// Doors are STATE MACHINES: appearance and behavior derive from density + locked (bolts) + welded
+// + panel_open + emag/broken + electrification, reconciled by update_appearance(). The base atom
+// save vars capture raw density/opacity/icon_state, which FIGHTS the state machine on reload: an
+// open airlock saved density=0 loaded walkable but LOOKING closed/mangled. So: raw physical vars
+// are stripped from door saves and the full semantic state is snapshotted instead, then re-applied
+// through the real mutators so every derived var reconciles itself.
 
 /obj/machinery/door
-	/// Persistent-map snapshot of runtime door damage: emagged ("fried") and broken states, which
-	/// aren't vars the base save covers - without this a hacked-dead airlock reloads pristine.
+	/// Persistent-map snapshot of the door's semantic state (open/bolted/welded/emagged/broken/
+	/// electrified). Flat assoc of scalars - DMM-safe. Consumed by the world payload walk.
 	var/list/persistent_door_state
 
 /obj/machinery/door/get_save_vars()
 	. = ..()
+	// The state machine owns these; saving them raw desyncs sprite from behavior (BUG #9).
+	. -= NAMEOF(src, density)
+	. -= NAMEOF(src, opacity)
+	. -= NAMEOF(src, icon_state)
 	persistent_door_state = null
 	var/list/state = list()
+	if(!density)
+		state["open"] = TRUE
 	if(obj_flags & EMAGGED)
 		state["emagged"] = TRUE
 	if(machine_stat & BROKEN)
 		state["broken"] = TRUE
+	if(istype(src, /obj/machinery/door/airlock))
+		var/obj/machinery/door/airlock/airlock = src
+		if(airlock.locked)
+			state["bolted"] = TRUE
+		if(airlock.welded)
+			state["welded"] = TRUE
+		if(airlock.secondsElectrified == MACHINE_ELECTRIFIED_PERMANENT)
+			state["electrified"] = TRUE
+	else if(locked)
+		state["bolted"] = TRUE
 	if(length(state))
 		persistent_door_state = state
 		. += NAMEOF(src, persistent_door_state)
 	return .
 
-/// Re-apply saved emag/broken state and redraw. Consumed by the world payload walk.
+/// Re-apply saved semantic door state through the real mutators, in dependency order: flags first,
+/// then OPEN (which airlock/open() refuses while welded/bolted - so those come after), then
+/// welds/bolts/electrification, then one redraw. Consumed by the world payload walk.
 /obj/machinery/door/proc/apply_persistent_door_state()
 	var/list/state = persistent_door_state
 	persistent_door_state = null
@@ -286,31 +394,37 @@
 		obj_flags |= EMAGGED
 	if(state["broken"])
 		set_machine_stat(machine_stat | BROKEN)
+	if(state["open"] && density)
+		// INVOKE_ASYNC: open() chains animations/timers; never block the restore walk on them.
+		INVOKE_ASYNC(src, PROC_REF(open), BYPASS_DOOR_CHECKS)
+	var/obj/machinery/door/airlock/airlock = src
+	if(istype(airlock))
+		if(state["welded"])
+			airlock.welded = TRUE
+		if(state["bolted"] && !airlock.locked)
+			airlock.bolt()
+		if(state["electrified"])
+			airlock.set_electrified(MACHINE_ELECTRIFIED_PERMANENT)
+	else if(state["bolted"])
+		locked = TRUE
 	update_appearance()
 
 // =================================================================================================
-// Floor items - full state records (reagents, storage contents, custom names/colours)
+// Floor items - full state records ride the payload sidecar (BUG #3)
 // =================================================================================================
 // write_map() saves loose items by type + a few base vars, so interior state "refreshed" on
-// reload: an RPED lost its parts, a used medipen came back full. Items whose state matters snapshot
-// their full serialize_persistent() record into a saved var; the walk applies it in place.
-
-/obj/item
-	/// Persistent-map (DMM-layer) snapshot of this item's full state record, for items lying loose
-	/// on a turf. Inventory/closet items ride the JSON layer instead.
-	var/list/persistent_item_record
+// reload: an RPED lost its parts, a used medipen came back full. Items whose state matters
+// register their full serialize_persistent() record as a payload; the walk applies it in place.
 
 /// Whether this item carries state worth a full record on the DMM layer. Storage and reagent
-/// holders always do; subtypes with bespoke data (ID cards, PDAs) override to TRUE.
+/// holders always do; subtypes with bespoke data (ID cards, PDAs, MODs) override to TRUE.
 /obj/item/proc/has_persistent_item_state()
 	return !isnull(atom_storage) || !isnull(reagents)
 
 /obj/item/get_save_vars()
 	. = ..()
-	persistent_item_record = null
 	if(has_persistent_item_state())
-		persistent_item_record = serialize_persistent(1)
-		. += NAMEOF(src, persistent_item_record)
+		SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_ITEM_RECORD, serialize_persistent(1))
 	return .
 
 // =================================================================================================
@@ -404,11 +518,15 @@
 // =================================================================================================
 // MOD suits (modules, core, cell)
 // =================================================================================================
+// A MOD's interior rides its serialize_persistent() record: "mod_loadout" owns core/cell/modules,
+// and (when a storage module is installed) "contents" owns the STORED items only - never the
+// suit's parts (see persistent_storage_location(), BUG #1). Floor MODs go through the generic
+// item_record payload; worn/closeted MODs through the JSON layer. There is no MOD-specific DMM
+// var anymore.
 
-/obj/item/mod/control
-	/// Persistent-map (DMM-layer) snapshot of this MOD's loadout for suits lying on a turf.
-	/// Suits worn by mobs or stored in closets ride the JSON item layer via serialize_persistent().
-	var/list/persistent_mod_loadout
+/// MODs always carry restorable state (loadout), storage module or not.
+/obj/item/mod/control/has_persistent_item_state()
+	return TRUE
 
 /// Snapshot the MOD's core (+ cell type/charge for standard cores) and installed module types.
 /obj/item/mod/control/proc/build_persistent_loadout()
@@ -478,15 +596,8 @@
 			catch(var/exception/module_error)
 				log_world("PERSISTENT_MAP: MOD module restore ([module_path]) failed on [src]: [module_error]")
 
-// DMM layer: suits lying on a turf snapshot into the saved var, consumed by the walk below.
-/obj/item/mod/control/get_save_vars()
-	. = ..()
-	persistent_mod_loadout = build_persistent_loadout()
-	if(persistent_mod_loadout)
-		. += NAMEOF(src, persistent_mod_loadout)
-	return .
-
-// JSON layer: suits worn by persisted mobs or stored in closets carry the loadout in their record.
+// Loadout rides the item record on BOTH layers (item_record payload for floor MODs, JSON records
+// for worn/closeted MODs).
 /obj/item/mod/control/serialize_persistent(depth = 1)
 	. = ..()
 	var/list/loadout = build_persistent_loadout()
@@ -498,40 +609,175 @@
 	apply_persistent_loadout(data["mod_loadout"])
 
 // =================================================================================================
-// World payload restore walk
+// World payload restore walk (sidecar-driven - design sec 12.12)
 // =================================================================================================
 
-/// Walk every persistent z-level once after load and consume all snapshot vars: turf decals
-/// (persistent_decals.dm), container item payloads, machine part upgrades, and MOD loadouts
-/// (above). Called from SSpersistence.Initialize(), after mapping + atoms init.
+/// Read each persisted level's payload sidecar and re-apply every entry to the object/turf it
+/// describes. Called from SSpersistence.Initialize(), after mapping + atoms init. Payload files
+/// were validated (traversal + existence) by the manifest load; entries are still trust-boundary
+/// data, so kinds/coords/types are checked here and item records go through the allowlisted
+/// restore pipeline. Level mapping: the k-th persistent z this boot corresponds to the k-th
+/// loaded level record (SSmapping.persistent_loaded_payloads is in load order).
 /datum/controller/subsystem/persistence/proc/apply_persistent_world_payloads()
+	if(!SSmapping.persistent_station_loaded)
+		return
+	// Fleet reconciliation must wait for SSshuttle setup (incl. roundstart loads), so it runs at
+	// round start rather than here (persistent_shuttles.dm, BUG #7).
+	SSticker.OnRoundstart(CALLBACK(src, PROC_REF(reconcile_persistent_shuttles)))
+	var/list/payload_files = SSmapping.persistent_loaded_payloads
+	if(!islist(payload_files) || !length(payload_files))
+		return
+	var/ordinal = 0
 	for(var/z in 1 to world.maxz)
 		if(!is_persistent_level(z))
 			continue
-		for(var/turf/tile as anything in Z_TURFS(z))
-			if(tile.persistent_turf_decals)
-				tile.apply_persistent_decals()
-			for(var/obj/thing in tile)
-				if(thing.persistent_contents)
-					thing.apply_persistent_contents()
-				if(ismachinery(thing))
-					var/obj/machinery/machine = thing
-					if(machine.persistent_stock_parts)
-						machine.apply_persistent_stock_parts()
-					if(istype(machine, /obj/machinery/door))
-						var/obj/machinery/door/door = machine
-						if(door.persistent_door_state)
-							door.apply_persistent_door_state()
-				else if(istype(thing, /obj/item/mod/control))
-					var/obj/item/mod/control/mod_suit = thing
-					if(mod_suit.persistent_mod_loadout)
-						var/list/loadout = mod_suit.persistent_mod_loadout
-						mod_suit.persistent_mod_loadout = null
-						mod_suit.apply_persistent_loadout(loadout)
-				else if(isitem(thing))
-					var/obj/item/loose_item = thing
-					if(loose_item.persistent_item_record)
-						var/list/record = loose_item.persistent_item_record
-						loose_item.persistent_item_record = null
-						loose_item.apply_persistent_item_record(record)
+		ordinal++
+		if(ordinal > length(payload_files))
+			return
+		apply_persistent_level_payloads(z, payload_files[ordinal])
+
+/// Apply one level's payload file onto the given (already loaded) z-level.
+/// EVERY application site is individually contained: one bad entry/machine must only ever cost
+/// itself, never the rest of the level (the report-#3 failure mode - a single runtime silently
+/// eating whole restore categories). A summary line logs what was applied and what was skipped.
+/datum/controller/subsystem/persistence/proc/apply_persistent_level_payloads(z, payload_name)
+	if(!istext(payload_name))
+		return
+	var/applied = 0
+	var/failed = 0
+	var/list/payload = safe_json_decode(file2text("[PERSISTENT_MAP_DIR]/[payload_name]"))
+	if(!islist(payload) || payload["version"] != PERSISTENT_PAYLOAD_VERSION)
+		log_world("PERSISTENT_MAP: payload file [payload_name] unreadable or version-mismatched; skipping its restores.")
+	else
+		var/list/entries = payload["entries"]
+		if(!islist(entries))
+			entries = list()
+		// One save-order pass; consumed-object tracking keeps multiple same-typed objects on one tile
+		// from double-applying (entries and objects are both in save order, so greedy matching works).
+		var/list/consumed = list()
+		for(var/list/entry as anything in entries)
+			if(!islist(entry) || !isnum(entry["x"]) || !isnum(entry["y"]) || !istext(entry["kind"]))
+				continue
+			var/turf/tile = locate(entry["x"], entry["y"], z)
+			if(!tile)
+				continue
+			var/list/data = entry["data"]
+			if(!islist(data))
+				continue
+			var/kind = entry["kind"]
+			// Turf-targeted / creation kinds first: no object matching involved.
+			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK)
+				try
+					if(kind == PERSISTENT_PAYLOAD_TURF_DECALS)
+						tile.apply_persistent_decals(data)
+					else
+						restore_persistent_stationary_dock(tile, data)
+					applied++
+				catch(var/exception/turf_error)
+					failed++
+					log_world("PERSISTENT_MAP: payload restore ([kind]) failed at ([entry["x"]],[entry["y"]],[z]): [turf_error]")
+				CHECK_TICK
+				continue
+			// Object-targeted kinds: match the first unconsumed object of the saved type on the tile.
+			var/obj/target
+			for(var/obj/candidate in tile)
+				if(consumed[candidate])
+					continue
+				if("[candidate.type]" == entry["type"])
+					target = candidate
+					break
+			if(!target)
+				failed++
+				log_world("PERSISTENT_MAP: no [entry["type"]] found at ([entry["x"]],[entry["y"]],[z]) for payload kind [kind]; skipped.")
+				continue
+			consumed[target] = TRUE
+			try
+				switch(kind)
+					if(PERSISTENT_PAYLOAD_CONTENTS)
+						target.apply_persistent_contents(data)
+					if(PERSISTENT_PAYLOAD_ITEM_RECORD)
+						var/obj/item/item_target = target
+						if(istype(item_target))
+							item_target.apply_persistent_item_record(data)
+					if(PERSISTENT_PAYLOAD_SSU_SLOTS)
+						var/obj/machinery/suit_storage_unit/ssu = target
+						if(istype(ssu))
+							ssu.apply_persistent_ssu_slots(data)
+					if(PERSISTENT_PAYLOAD_SHELF_CRATES)
+						var/obj/structure/cargo_shelf/shelf = target
+						if(istype(shelf))
+							shelf.apply_persistent_shelf_crates(data)
+					else
+						log_world("PERSISTENT_MAP: unknown payload kind [kind] at ([entry["x"]],[entry["y"]],[z]); skipped.")
+				applied++
+			catch(var/exception/apply_error)
+				failed++
+				log_world("PERSISTENT_MAP: payload restore ([kind] on [target]) failed at ([entry["x"]],[entry["y"]],[z]): [apply_error]")
 			CHECK_TICK
+	// Flat DMM vars that still need a post-load consumer: machine stock-part upgrades and door
+	// semantic state (BUG #9). One machinery pass per level so sprites/behavior/tiers sync before
+	// the round starts. Per-machine containment: one broken machine must not cost the rest their
+	// tiers/door state (the report-#3 tier-loss failure mode).
+	var/tiers_applied = 0
+	var/doors_applied = 0
+	for(var/obj/machinery/machine as anything in SSmachines.get_all_machines())
+		if(machine.z != z)
+			continue
+		if(machine.persistent_stock_parts)
+			try
+				machine.apply_persistent_stock_parts()
+				tiers_applied++
+			catch(var/exception/parts_error)
+				failed++
+				log_world("PERSISTENT_MAP: stock-part restore failed on [machine] at [AREACOORD(machine)]: [parts_error]")
+		if(istype(machine, /obj/machinery/door))
+			var/obj/machinery/door/door = machine
+			if(door.persistent_door_state)
+				try
+					door.apply_persistent_door_state()
+					doors_applied++
+				catch(var/exception/door_error)
+					failed++
+					log_world("PERSISTENT_MAP: door-state restore failed on [door] at [AREACOORD(door)]: [door_error]")
+		CHECK_TICK
+	log_world("PERSISTENT_MAP: z[z] payload restore complete - [applied] payload entries applied, [tiers_applied] machine part sets, [doors_applied] door states, [failed] failures (see lines above).")
+
+/// Recreate a station stationary dock that was occluded by a docked shuttle at save time (its
+/// tile was in a shuttle area, so SAVE_SHUTTLEAREA_IGNORE nooped it - BUG #7 v3). Values come off
+/// the trust-boundary payload: type/template path-validated, text sanitized, numerics forced.
+/// Skips tiles that already hold a stationary dock (e.g. a shipped-map dock that survived).
+/datum/controller/subsystem/persistence/proc/restore_persistent_stationary_dock(turf/tile, list/data)
+	if(locate(/obj/docking_port/stationary) in tile)
+		return
+	var/dock_path = text2path(data["type"])
+	if(!ispath(dock_path, /obj/docking_port/stationary))
+		log_world("PERSISTENT_MAP: rejected stationary dock type [data["type"]] at [AREACOORD(tile)].")
+		return
+	var/obj/docking_port/stationary/dock = new dock_path(tile)
+	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
+	if(clean_name)
+		dock.name = clean_name
+	if(isnum(data["dir"]))
+		dock.setDir(data["dir"])
+	var/clean_id = sanitize_persistent_text(data["shuttle_id"], PERSISTENT_MAX_NAME_LEN)
+	if(clean_id)
+		dock.shuttle_id = clean_id
+	if(isnum(data["width"]))
+		dock.width = data["width"]
+	if(isnum(data["height"]))
+		dock.height = data["height"]
+	if(isnum(data["dwidth"]))
+		dock.dwidth = data["dwidth"]
+	if(isnum(data["dheight"]))
+		dock.dheight = data["dheight"]
+	var/template_path = text2path(data["roundstart_template"])
+	if(ispath(template_path, /datum/map_template/shuttle))
+		dock.roundstart_template = template_path
+	var/area_path = text2path(data["area_type"])
+	if(ispath(area_path, /area))
+		dock.area_type = area_path
+	// No further wiring needed: stationary docks fully self-manage. Initialize() already
+	// register()ed with SSshuttle, and if SSshuttle was initialized before this dock existed,
+	// LateInitialize() runs setup_shuttles(list(src)) - which load_roundstart()s any
+	// roundstart_template/json_key spawn for it. Both init orders are covered natively.
+	log_world("PERSISTENT_MAP: recreated occluded stationary dock '[dock.shuttle_id]' at [AREACOORD(tile)].")
