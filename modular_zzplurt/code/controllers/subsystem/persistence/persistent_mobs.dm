@@ -98,8 +98,15 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 			continue
 		// get_turf(): a mob inside a container (body bag, locker, sleeper) has z = 0 and would be
 		// silently dropped by a raw resident.z check - gate on the container's turf instead.
+		// WIZARD DEN EXEMPTION (by request): the den is a lazy-loaded template off-station, and a
+		// restored wizard's move_to_lair sends them home - a body living there must persist too,
+		// or the next save deletes the wizard. Den coordinates are NOT stable across boots (lazy
+		// z allocation), so den residents save with an in_lair flag instead of trusted coords.
 		var/turf/resident_turf = get_turf(resident)
-		if(!resident_turf || !is_persistent_level(resident_turf.z))
+		if(!resident_turf)
+			continue
+		var/in_lair = istype(get_area(resident), /area/centcom/wizard_station)
+		if(!is_persistent_level(resident_turf.z) && !in_lair)
 			continue
 		// One runtiming mob must not abort the whole actor save: replace() would never run and a STALE
 		// persistent_mobs.json (a previous round's actors) would reload against this round's map.
@@ -111,6 +118,8 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 			continue
 		if(!record)
 			continue
+		if(in_lair)
+			record["in_lair"] = TRUE
 		// Player carbons persist WITH their mind + a ckey LABEL (private-fork choice, design sec 10.2).
 		// The ckey is inert data that only drives the opt-in re-entry offer (sec 8.6); nothing consumes
 		// it automatically, and the body reloads clientless. owner_ckey is the live mind key when a
@@ -182,15 +191,27 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	if(!ispath(mob_path, /mob/living) || !is_persistent_type_allowed(mob_path))
 		return null
 
-	// Coordinates come off the trust-boundary file - reject non-numbers before locate() sees them.
-	if(!isnum(record["x"]) || !isnum(record["y"]) || !isnum(record["z"]))
-		return null
-	// Body-in-a-hostile-spot guard (design sec 8.6): if the saved turf is gone or no longer a
-	// persistent level, skip rather than spawning into the void. (A future iteration could fall
-	// back to an arrivals spawn instead.)
-	var/turf/spawn_turf = locate(record["x"], record["y"], record["z"])
-	if(!spawn_turf || !is_persistent_level(spawn_turf.z))
-		return null
+	var/turf/spawn_turf
+	if(record["in_lair"])
+		// Saved in the wizard den (a lazy-loaded off-station template whose coordinates are NOT
+		// stable across boots). Load the den and spawn at its start landmarks, exactly like the
+		// wizard datum's own send_to_lair() does.
+		SSmapping.lazy_load_template(LAZY_TEMPLATE_KEY_WIZARDDEN)
+		if(length(GLOB.wizardstart))
+			spawn_turf = get_turf(pick(GLOB.wizardstart))
+		if(!spawn_turf)
+			log_world("PERSISTENT_MAP: wizard den unavailable for an in_lair record; skipping restore.")
+			return null
+	else
+		// Coordinates come off the trust-boundary file - reject non-numbers before locate() sees them.
+		if(!isnum(record["x"]) || !isnum(record["y"]) || !isnum(record["z"]))
+			return null
+		// Body-in-a-hostile-spot guard (design sec 8.6): if the saved turf is gone or no longer a
+		// persistent level, skip rather than spawning into the void. (A future iteration could fall
+		// back to an arrivals spawn instead.)
+		spawn_turf = locate(record["x"], record["y"], record["z"])
+		if(!spawn_turf || !is_persistent_level(spawn_turf.z))
+			return null
 
 	var/mob/living/body = new mob_path(spawn_turf)
 
@@ -225,6 +246,16 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 			dormant.deserialize_persistent(record["mind"])
 		catch(var/exception/mind_error)
 			log_world("PERSISTENT_MAP: mind restore for [claim_ckey]'s body partially failed: [mind_error]")
+		// ANTI-YOINK GUARD: antag on_gain() spawn logistics can relocate the body (nukeops do it
+		// via a bare proc no flag can disable). A persisted body belongs where it was saved;
+		// being teleported to an unsanctioned off-station z means the NEXT save silently drops it
+		// (non-persistent) - the "character deleted" failure mode. EXCEPTION (by request): the
+		// wizard den is a sanctioned home - move_to_lair stays enabled, and the save layer's
+		// in_lair flag keeps den residents persisting.
+		var/turf/landed_turf = get_turf(body)
+		if(landed_turf != spawn_turf && !istype(get_area(body), /area/centcom/wizard_station))
+			log_world("PERSISTENT_MAP: [claim_ckey]'s body was relocated to [AREACOORD(body)] during mind restore (antag spawn logistics); returning it to [AREACOORD(spawn_turf)].")
+			body.forceMove(spawn_turf)
 
 	return body
 

@@ -667,7 +667,20 @@
 			if(!ispath(antag_path, /datum/antagonist) || !is_persistent_type_allowed(antag_path) || has_antag_datum(antag_path))
 				continue
 			try
-				add_antag_datum(antag_path)
+				// Restore the ROLE, not the fresh-spawn ritual: antag on_gain() procs run spawn
+				// logistics that are catastrophic on an already-restored body. The wizard's
+				// on_gain() delete_equipment()s the restored inventory (the "my MOD/BRPED/character
+				// deleted themselves" event) and renames a clientless mob. Instantiate the datum
+				// ourselves and neuter those flags before add_antag_datum(). DELIBERATELY KEPT:
+				// move_to_lair - a restored wizard belongs back in the wizard den (by request);
+				// the save/restore gates and positional guard all treat the den as a sanctioned
+				// home (persistent_mobs.dm). Other antags' proc-driven relocation (nukeops'
+				// move_to_spawnpoint()) is still undone by the positional guard.
+				var/datum/antagonist/antag = new antag_path()
+				for(var/spawn_var in list("strip", "allow_rename", "move_to_spawnpoint", "send_to_spawnpoint"))
+					if(spawn_var in antag.vars)
+						antag.vars[spawn_var] = FALSE
+				add_antag_datum(antag)
 			catch(var/exception/antag_error)
 				log_world("PERSISTENT_MAP: antag restore ([antag_path]) failed on [name]: [antag_error]")
 	// Mind-bound actions - allowlist-gated, duplicate-guarded (skips types the just-restored antag

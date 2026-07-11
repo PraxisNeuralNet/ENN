@@ -361,8 +361,15 @@
 	. -= NAMEOF(src, icon_state)
 	persistent_door_state = null
 	var/list/state = list()
-	if(!density)
+	// Open/closed is recorded RELATIVE TO THE TYPE DEFAULT: default-closed doors (airlocks,
+	// plain poddoors) record "open", and default-open doors (preopen blast doors/shutters,
+	// firelocks) record "closed". The old open-only snapshot lost closed blast doors entirely -
+	// they reloaded at their OPEN type default. This also stops every idle open firelock from
+	// carrying a redundant state entry.
+	if(!density && initial(density))
 		state["open"] = TRUE
+	else if(density && !initial(density))
+		state["closed"] = TRUE
 	if(obj_flags & EMAGGED)
 		state["emagged"] = TRUE
 	if(machine_stat & BROKEN)
@@ -395,8 +402,11 @@
 	if(state["broken"])
 		set_machine_stat(machine_stat | BROKEN)
 	if(state["open"] && density)
-		// INVOKE_ASYNC: open() chains animations/timers; never block the restore walk on them.
+		// INVOKE_ASYNC: open()/close() chain animations/timers; never block the restore walk on them.
 		INVOKE_ASYNC(src, PROC_REF(open), BYPASS_DOOR_CHECKS)
+	else if(state["closed"] && !density)
+		// Default-open doors (preopen blast doors, shutters, firelocks) that were closed at save.
+		INVOKE_ASYNC(src, PROC_REF(close), BYPASS_DOOR_CHECKS)
 	var/obj/machinery/door/airlock/airlock = src
 	if(istype(airlock))
 		if(state["welded"])
