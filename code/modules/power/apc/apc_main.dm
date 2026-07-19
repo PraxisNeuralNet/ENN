@@ -168,9 +168,14 @@
 		start_charge = cell.charge / cell.maxcharge // only used in Initialize() so direct edit is fine
 		. += NAMEOF(src, start_charge)
 
+	// SPLURT EDIT ADDITION - PERSISTENT_MAP (29th pass): locked is the ID-swipe INTERFACE lock, a
+	// plain boolean with no wire involvement - it was parked in the wire-data TODO below by
+	// mistake. Without it every ID-unlocked APC reloaded LOCKED (initial() is TRUE); the
+	// initial()-diff means only unlocked panels write the var.
+	. += NAMEOF(src, locked)
+	// SPLURT EDIT END
 	// TODO save the wire data but need to include states for cute wires, signalers attached to wires, etc.
 	//. += NAMEOF(src, shorted)
-	//. += NAMEOF(src, locked)
 	return .
 
 /obj/machinery/power/apc/Initialize(mapload)

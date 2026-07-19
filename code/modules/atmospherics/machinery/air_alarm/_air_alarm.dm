@@ -88,7 +88,12 @@ GLOBAL_LIST_EMPTY_TYPED(air_alarms, /obj/machinery/airalarm)
 	acid = 30
 
 /obj/machinery/airalarm/get_save_vars()
-	return ..() - NAMEOF(src, name)
+	// SPLURT EDIT CHANGE - PERSISTENT_MAP (29th pass): save the ID-swipe interface lock - without
+	// it every unlocked air alarm reloaded LOCKED (initial() is TRUE). ORIGINAL: return ..() - NAMEOF(src, name)
+	. = ..() - NAMEOF(src, name)
+	. += NAMEOF(src, locked)
+	return .
+	// SPLURT EDIT END
 
 /obj/machinery/airalarm/Initialize(mapload)
 	. = ..()
