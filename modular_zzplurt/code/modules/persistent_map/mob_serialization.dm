@@ -167,6 +167,10 @@
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
 				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+		// Fill-state sprites derive from reagents but Initialize rendered BEFORE this record
+		// applied - without a redraw an emptied medipen/beaker wears its factory-new sprite
+		// (thirty-second pass, "used medipens refreshing").
+		update_appearance()
 	// Hand-edited (VV) vars (twentieth pass) - shared filtered applier (persistent_containers.dm).
 	apply_persistent_edited_vars(src, data["edited_vars"])
 

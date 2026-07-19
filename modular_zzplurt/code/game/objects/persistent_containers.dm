@@ -740,6 +740,86 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	update_appearance()
 
 // =================================================================================================
+// Spent consumables: medipens/hyposprays + ammo casings + ammo boxes (thirty-second pass)
+// =================================================================================================
+// "Spent ammo casings and used medipens refresh to new." Three cooperating fixes:
+//   - hyposprays: the used_up latch (set when a medipen empties - makes it permanently inert)
+//     never rode the record, so an empty-but-restored pen was mechanically fresh.
+//   - casings: Initialize() ALWAYS loads a live projectile; a spent casing reloaded as live ammo
+//     wearing a spent sprite (the DMM saved icon_state but not the state behind it).
+//   - ammo boxes/magazines: stored_ammo is a plain ref list (not storage), so a part-emptied mag
+//     or a cylinder full of spent brass reloaded at its factory default.
+// (The generic reagent restore now also redraws fill-state sprites - mob_serialization.dm.)
+
+/obj/item/reagent_containers/hypospray/serialize_persistent(depth = 1)
+	. = ..()
+	if(used_up)
+		.["used_up"] = TRUE
+
+/obj/item/reagent_containers/hypospray/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	if(data["used_up"] && !used_up)
+		used_up = TRUE
+		if(reagents)
+			reagents.flags = NONE // mirror medipen inject()'s spend path
+		update_appearance()
+
+/obj/item/ammo_casing/has_persistent_item_state()
+	return isnull(loaded_projectile) || ..()
+
+/obj/item/ammo_casing/serialize_persistent(depth = 1)
+	. = ..()
+	if(isnull(loaded_projectile))
+		.["spent"] = TRUE
+
+/obj/item/ammo_casing/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	if(data["spent"] && loaded_projectile)
+		QDEL_NULL(loaded_projectile)
+		update_appearance()
+
+/obj/item/ammo_box/has_persistent_item_state()
+	return TRUE
+
+/obj/item/ammo_box/serialize_persistent(depth = 1)
+	. = ..()
+	// ALWAYS present, so an emptied magazine is authoritative and stays empty.
+	var/list/ammo_records = list()
+	if(depth < PERSISTENT_MAX_RECURSION_DEPTH)
+		for(var/obj/item/ammo_casing/casing as anything in stored_ammo)
+			var/list/record = casing.serialize_persistent(depth + 1)
+			if(record)
+				ammo_records += list(record)
+	.["stored_ammo"] = ammo_records
+
+/obj/item/ammo_box/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	var/list/ammo_records = data["stored_ammo"]
+	if(!islist(ammo_records))
+		return // legacy record - keep the type-default load
+	// Saved load is authoritative; SAFETY VALVE as everywhere - never wipe on a garbage list.
+	if(!persistent_records_restorable(ammo_records))
+		log_world("PERSISTENT_MAP: untrustworthy ammo record for [src]; keeping default load.")
+		return
+	for(var/obj/item/ammo_casing/stale as anything in stored_ammo.Copy())
+		stored_ammo -= stale
+		qdel(stale)
+	for(var/list/record as anything in ammo_records)
+		if(!islist(record) || length(stored_ammo) >= max_ammo)
+			continue
+		var/casing_path = text2path(record["type"])
+		if(!ispath(casing_path, /obj/item/ammo_casing) || !is_persistent_type_allowed(casing_path))
+			continue
+		var/obj/item/ammo_casing/casing = new casing_path(src)
+		// Same gate the loading interaction enforces: never mint wrong-caliber ammo into a mag.
+		if(caliber && casing.caliber != caliber)
+			qdel(casing)
+			continue
+		casing.deserialize_persistent(record, depth + 1)
+		stored_ammo += casing
+	update_appearance()
+
+// =================================================================================================
 // Radios / headsets (encryption keys)
 // =================================================================================================
 // Encryption keys are REFERENCE vars (keyslot, headsets add keyslot2), not storage contents, so
