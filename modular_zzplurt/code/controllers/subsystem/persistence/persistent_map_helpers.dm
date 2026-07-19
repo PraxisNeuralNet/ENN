@@ -14,6 +14,24 @@
 /proc/persistent_level_role(z)
 	return is_persistent_level(z) ? PERSISTENT_ROLE_STATION : null
 
+/// Shuttle areas that persist as STATION content instead of being nooped + template-respawned
+/// (twenty-sixth pass). The aux base is a construction room crews customize like any other room;
+/// re-stamping its template every boot reset the floors and respawned the default furniture
+/// (locker, ore box, canister, console, beacon) - stacking fresh copies against anything players
+/// had moved out, which the snapshot faithfully kept. An area listed here bakes into the DMM;
+/// its dock skips the roundstart template spawn while the baked room is standing (see
+/// load_roundstart in persistent_shuttles.dm) and spawns normally once the room is gone (fresh
+/// data, or the round after the base was launched to the mining site). The mobile port stays
+/// blacklisted either way - a baked port is inert (register() never runs for it), so a persisted
+/// base's console reads "Missing" until the room is next respawned from template.
+/// Accepts an area instance or an area typepath.
+/proc/is_persistent_exempt_shuttle_area(area_or_path)
+	var/static/list/exempt_typecache = typecacheof(list(/area/shuttle/auxiliary_base))
+	if(isarea(area_or_path))
+		var/area/area_instance = area_or_path
+		return exempt_typecache[area_instance.type]
+	return ispath(area_or_path) && exempt_typecache[area_or_path]
+
 /// TRUE when the given area lives on a persistent level that was loaded FROM A SNAPSHOT this
 /// boot. Roundstart injection systems (SSarea_spawn datums, SSjob's scaling sec-equipment
 /// lockers) must skip such areas: whatever they spawned the round the snapshot was first taken

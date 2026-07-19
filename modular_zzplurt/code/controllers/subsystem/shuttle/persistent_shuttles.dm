@@ -23,6 +23,14 @@
 	// cases and double-setup calls (a recreated dock's LateInitialize AND a late SSshuttle pass).
 	if(SSmapping.persistent_station_loaded && get_docked())
 		return
+	// EXEMPT-AREA GUARD (twenty-sixth pass): a persistent-exempt shuttle area (the aux base)
+	// baked into the snapshot IS this dock's shuttle - the crew's customized room, minus the
+	// (blacklisted, would-be-inert) mobile port. Stamping the template over it is what reset the
+	// floors and respawned the default furniture every boot. Once the room is gone (launched to
+	// the mining site last round, or fresh data), the footprint reverts to the station
+	// construction area and the spawn proceeds normally, yielding a fresh launchable base.
+	if(SSmapping.persistent_station_loaded && is_persistent_exempt_shuttle_area(get_area(src)))
+		return
 	// --- core body, replicated verbatim ---
 	if(json_key)
 		var/sid = SSmapping.current_map.shuttles[json_key]

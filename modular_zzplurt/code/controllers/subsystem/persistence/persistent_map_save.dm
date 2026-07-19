@@ -102,6 +102,11 @@
 			var/turf/dock_turf = get_turf(dock)
 			if(!dock_turf || dock_turf.z != z || !istype(get_area(dock), /area/shuttle))
 				continue
+			// Exempt-area tiles (aux base, twenty-sixth pass) are no longer nooped - the dock
+			// under them bakes into the DMM with its saved vars, so a payload copy would be
+			// redundant (the restore's already-has-a-dock guard would skip it anyway).
+			if(is_persistent_exempt_shuttle_area(get_area(dock)))
+				continue
 			collect_persistent_payload(dock, PERSISTENT_PAYLOAD_STATIONARY_DOCK, list(
 				"type" = "[dock.type]",
 				"name" = dock.name,
@@ -162,6 +167,16 @@
 		var/list/shuttle_ids = list()
 		for(var/obj/docking_port/mobile/port as anything in SSshuttle.mobile_docking_ports)
 			if(port.z == z && port.shuttle_id != "emergency" && port.shuttle_id != "backup")
+				// Exempt-area shuttles (aux base, twenty-sixth pass) bake into the snapshot and
+				// deliberately do NOT template-respawn while the baked room stands - recording
+				// them here would make the fleet audit red-alert a "missing" shuttle every boot.
+				var/exempt = FALSE
+				for(var/area/port_area as anything in port.shuttle_areas)
+					if(is_persistent_exempt_shuttle_area(port_area))
+						exempt = TRUE
+						break
+				if(exempt)
+					continue
 				shuttle_ids += port.shuttle_id
 		var/list/last_level = manifest["levels"][length(manifest["levels"])]
 		last_level["shuttles"] = shuttle_ids

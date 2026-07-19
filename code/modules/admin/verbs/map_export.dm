@@ -270,7 +270,7 @@ GLOBAL_LIST_INIT(save_file_chars, list(
 					place = pull_from.type
 
 				//====Saving shuttles only / non shuttles only====
-				var/is_shuttle_area = ispath(location, /area/shuttle)
+				var/is_shuttle_area = ispath(location, /area/shuttle) && !is_persistent_exempt_shuttle_area(location) // SPLURT EDIT CHANGE - PERSISTENT_MAP (26th pass): exempt shuttle areas (aux base) save as station content instead of being nooped - ORIGINAL: var/is_shuttle_area = ispath(location, /area/shuttle)
 				if((is_shuttle_area && shuttle_area_flag == SAVE_SHUTTLEAREA_IGNORE) || (!is_shuttle_area && shuttle_area_flag == SAVE_SHUTTLEAREA_ONLY))
 					place = /turf/template_noop
 					location = /area/template_noop
