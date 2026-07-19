@@ -306,12 +306,18 @@
 	.["voice"] = voice_data
 	// Internal organs (incl. cybernetics/species organs) - ALWAYS present so a removed organ stays
 	// removed. External organs (tails etc.) are excluded; species/features own those.
-	var/list/organ_types = list()
+	// Each entry records the ZONE alongside the type (twenty-first pass): zone-flexible organs
+	// (arm implants) install into whichever arm the surgeon picked, and restoring by bare type
+	// piled every implant into its type-default (right-arm) slot - mob_insert() then force-drops
+	// the displaced occupant onto the floor (the "arm implant falls out on reload" bug). A plain
+	// list rather than an assoc set, so two same-typed organs in different zones (dual muscle
+	// implants) stay distinct entries.
+	var/list/organ_records = list()
 	for(var/obj/item/organ/organ as anything in organs)
 		if(organ.organ_flags & ORGAN_EXTERNAL)
 			continue
-		organ_types += "[organ.type]"
-	.["organs"] = organ_types
+		organ_records += list(list("type" = "[organ.type]", "zone" = organ.zone))
+	.["organs"] = organ_records
 	// Implants (mindshield, tracking, storage...) by type.
 	var/list/implant_types = list()
 	for(var/obj/item/implant/implanted as anything in implants)
@@ -371,27 +377,57 @@
 			pitch = clamp(voice_data["tts_pitch"], -100, 100)
 	// Internal organs - reconcile the spawned (species-default) set against the saved set:
 	// remove organs that were cut out/replaced, insert saved ones that are missing (cybernetics
-	// round-trip). Per-organ try/catch; external organs never touched.
+	// round-trip). Per-organ try/catch; external organs never touched. Saved entries are records
+	// (list("type", "zone")) since the twenty-first pass; bare-text legacy entries still restore,
+	// zoneless (they take the type-default zone, guarded against slot collisions below).
 	if(islist(data["organs"]))
 		var/list/saved_organs = list()
-		for(var/organ_text in data["organs"])
-			var/organ_path = text2path(organ_text)
-			if(ispath(organ_path, /obj/item/organ) && is_persistent_type_allowed(organ_path))
-				saved_organs[organ_path] = TRUE
+		for(var/organ_entry in data["organs"])
+			var/entry_text = islist(organ_entry) ? organ_entry["type"] : organ_entry
+			var/organ_path = istext(entry_text) ? text2path(entry_text) : null
+			if(!ispath(organ_path, /obj/item/organ) || !is_persistent_type_allowed(organ_path))
+				continue
+			var/entry_zone = islist(organ_entry) ? organ_entry["zone"] : null
+			saved_organs += list(list("path" = organ_path, "zone" = istext(entry_zone) ? entry_zone : null))
 		for(var/obj/item/organ/organ as anything in organs.Copy())
 			if(organ.organ_flags & ORGAN_EXTERNAL)
 				continue
-			if(saved_organs[organ.type])
-				saved_organs -= organ.type // already present, don't re-add
+			// Consume one saved record per existing organ - matched by type AND, when the record
+			// carries one, zone - so same-typed organs in different arms reconcile one-to-one.
+			var/list/matched_record
+			for(var/list/record as anything in saved_organs)
+				if(record["path"] != organ.type)
+					continue
+				if(record["zone"] && record["zone"] != organ.zone)
+					continue
+				matched_record = record
+				break
+			if(matched_record)
+				saved_organs -= list(matched_record) // already present, don't re-add
 				continue
 			try
 				organ.Remove(src, special = TRUE)
 				qdel(organ)
 			catch(var/exception/organ_remove_error)
 				log_world("PERSISTENT_MAP: organ removal ([organ]) failed on [name]: [organ_remove_error]")
-		for(var/organ_path in saved_organs)
+		for(var/list/record as anything in saved_organs)
+			var/organ_path = record["path"]
 			try
 				var/obj/item/organ/new_organ = new organ_path()
+				// Re-target the saved zone BEFORE Insert (surgery does the same via
+				// pre_surgical_insertion -> swap_zone); without it every zone-flexible implant
+				// lands in its type-default slot.
+				var/saved_zone = record["zone"]
+				if(saved_zone && islist(new_organ.valid_zones) && new_organ.valid_zones[saved_zone] && saved_zone != new_organ.zone)
+					new_organ.swap_zone(saved_zone)
+				// A restore-time slot conflict must never eject an already-present organ onto
+				// the floor (mob_insert() force-drops the replaced occupant): skip this record
+				// instead. Only reachable from conflicting/legacy-zoneless data - the removal
+				// loop above already vacated every slot the save legitimately owns.
+				if(get_organ_slot(new_organ.slot))
+					log_world("PERSISTENT_MAP: organ restore ([organ_path]) skipped on [name]: slot [new_organ.slot] already occupied.")
+					qdel(new_organ)
+					continue
 				if(!new_organ.Insert(src, special = TRUE))
 					qdel(new_organ)
 			catch(var/exception/organ_error)
