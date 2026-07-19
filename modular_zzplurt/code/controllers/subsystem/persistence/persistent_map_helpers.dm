@@ -68,4 +68,20 @@
 		blacklist += typecacheof(list(/obj/docking_port/mobile))
 	return blacklist
 
-/// Parse
+/// Parsed, validated persistent-map manifest. Only ever constructed by load_persistent_manifest(),
+/// which guarantees version, dimensions and referenced files are all sane before this exists.
+/datum/persistent_map_manifest
+	/// Snapshot format version (always == PERSISTENT_MAP_VERSION once validated).
+	var/version
+	/// world.maxx / world.maxy the snapshot was taken at (load is size-locked to these).
+	var/saved_maxx
+	var/saved_maxy
+	/// Ordered level records: list("role", "ordinal", "file", "payloads", "traits", "shuttles", "staged_file").
+	var/list/levels = list()
+
+/// All level records for a role, in saved order (the save loop emits ascending ordinals).
+/datum/persistent_map_manifest/proc/records_for_role(role)
+	. = list()
+	for(var/list/record as anything in levels)
+		if(record["role"] == role)
+			. += list(record)
