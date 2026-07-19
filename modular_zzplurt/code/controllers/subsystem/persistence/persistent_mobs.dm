@@ -83,6 +83,23 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		return ""
 	return trim(STRIP_HTML_FULL(text, PERSISTENT_MAX_LAW_LEN + 1), PERSISTENT_MAX_LAW_LEN + 1)
 
+/// Validate a GAGS colour string ("#RRGGBB#RRGGBB...", thirty-first pass): '#' and hex digits
+/// only, leading '#', length-capped. Returns the string or null - the count-vs-config match is
+/// left to SSgreyscale inside the caller's try/catch.
+/proc/sanitize_persistent_greyscale(text)
+	if(!istext(text) || length(text) < 7 || length(text) > 100)
+		return null
+	if(text2ascii(text, 1) != 35) // '#'
+		return null
+	for(var/i in 1 to length(text))
+		var/ch = text2ascii(text, i)
+		if(ch == 35) // '#'
+			continue
+		if((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 70) || (ch >= 97 && ch <= 102)) // 0-9 A-F a-f
+			continue
+		return null
+	return text
+
 // --- Save ------------------------------------------------------------------------------------
 
 /// Lazily create / fetch the mob actor-layer json_database.

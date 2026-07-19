@@ -634,8 +634,16 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 
 /// Whether this item carries state worth a full record on the DMM layer. Storage and reagent
 /// holders always do; subtypes with bespoke data (ID cards, PDAs, MODs) override to TRUE.
+/// GAGS-recoloured and style-toggled items qualify too (thirty-first pass): their generated
+/// icons can't ride the DMM (tgm_encode of a runtime icon is garbage), so the record is what
+/// re-renders a floor poncho's colours/style on load.
 /obj/item/proc/has_persistent_item_state()
-	return !isnull(atom_storage) || !isnull(reagents)
+	if(!isnull(atom_storage) || !isnull(reagents))
+		return TRUE
+	if(istext(greyscale_colors) && greyscale_colors != initial(greyscale_colors))
+		return TRUE
+	var/datum/component/toggle_clothes/style_toggle = GetComponent(/datum/component/toggle_clothes)
+	return !isnull(style_toggle?.toggled) && style_toggle.toggled
 
 /obj/item/get_save_vars()
 	. = ..()

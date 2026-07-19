@@ -108,6 +108,16 @@
 			.["color"] = color_matrix.Copy()
 		else
 			.["color"] = color
+	// Player GAGS recolours (ranger ponchos, jumpsuits - anything IS_PLAYER_COLORABLE, thirty-
+	// first pass): the generated icon itself can't ride any layer, but the colour STRING can -
+	// update_greyscale() regenerates both the flat and worn icons from it on restore.
+	if(istext(greyscale_colors) && greyscale_colors != initial(greyscale_colors))
+		.["greyscale_colors"] = greyscale_colors
+	// Alt-style toggle (skyrat toggle_clothes - poncho worn-styles etc.): a flag, re-applied
+	// through the component so the swapped icon_state matches its configured toggled state.
+	var/datum/component/toggle_clothes/style_toggle = GetComponent(/datum/component/toggle_clothes)
+	if(style_toggle?.toggled)
+		.["style_toggled"] = TRUE
 	// Reagent contents (medipens, beakers, sprays...) - without this a used medipen reloads full.
 	if(reagents)
 		var/list/chems = list()
@@ -132,6 +142,23 @@
 		return
 	if(!isnull(data["color"]) && (istext(data["color"]) || islist(data["color"])))
 		color = data["color"]
+	// GAGS recolour (thirty-first pass): only meaningful on items that carry a greyscale config;
+	// a colour-count/config mismatch fails inside SSgreyscale and costs only this item's tint.
+	if(istext(data["greyscale_colors"]) && greyscale_config)
+		var/clean_colors = sanitize_persistent_greyscale(data["greyscale_colors"])
+		if(clean_colors && clean_colors != greyscale_colors)
+			try
+				set_greyscale(clean_colors)
+			catch(var/exception/greyscale_error)
+				log_world("PERSISTENT_MAP: greyscale restore failed on [src]: [greyscale_error]")
+	// Alt-style toggle: the component exists on the freshly-spawned item (its Initialize adds
+	// it); re-assert the toggled state the same way clothing_toggle does, minus the chatter.
+	if(data["style_toggled"])
+		var/datum/component/toggle_clothes/style_toggle = GetComponent(/datum/component/toggle_clothes)
+		if(style_toggle && !style_toggle.toggled)
+			style_toggle.toggled = TRUE
+			icon_state = style_toggle.toggled_icon_state
+			update_appearance(UPDATE_ICON)
 	if(islist(data["reagents"]) && reagents)
 		reagents.clear_reagents() // saved contents are authoritative - a used medipen stays used
 		for(var/list/chem as anything in data["reagents"])
