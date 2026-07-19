@@ -5,7 +5,17 @@
 
 	. = ..()
 
-	if(mapload && is_main_engine && isturf(src.loc))
+	// SPLURT EDIT CHANGE - PERSISTENT_MAP (twenty-fifth pass): the beacon conversion is a
+	// roundstart INJECTION balanced for a world that resets every round. On a snapshot boot the
+	// mapload main-engine SM IS the engine the crew chose and built last shift (deploy_supermatter
+	// spawns /engine, is_main_engine = TRUE) - converting it erased the chosen engine and reset
+	// the room to a choice beacon every reload. Skip the conversion for snapshot-loaded station
+	// levels only: fresh (shipped-map) boots still convert, ruins/away SMs (non-persistent z,
+	// regenerate every round) still convert, and a beacon saved before anyone chose reloads as
+	// itself and stays usable.
+	// ORIGINAL: if(mapload && is_main_engine && isturf(src.loc))
+	if(mapload && is_main_engine && isturf(src.loc) && !(SSmapping.persistent_station_loaded && is_persistent_level(z)))
+	// SPLURT EDIT END
 		new/obj/machinery/engine_choice(src.loc)
 		return INITIALIZE_HINT_QDEL
 
