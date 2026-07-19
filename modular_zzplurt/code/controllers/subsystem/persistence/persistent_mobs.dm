@@ -19,6 +19,22 @@
 GLOBAL_LIST_INIT(persistent_type_allowlist, generate_persistent_type_allowlist())
 GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	/obj/item/melee/energy, // example of a hot subtree a deployment may want to exclude
+	// Ambient vermin (twenty-fourth pass): the mice-migration random EVENT re-runs
+	// SSminor_mapping.trigger_migration() mid-round, spawning from the same mouse/snail/stoat
+	// table the sixteenth-pass roundstart guard already suppresses. Persisting those mobs meant
+	// every round's migration batch was baked into the JSON layer and re-appeared - wherever it
+	// had wandered by round end - at every shift reset, compounding round over round ("rats/
+	// snails/stoats spawn randomly every reset"). Vermin are round-scoped ambience: the event
+	// still fires and its critters live out their round, but they no longer ride the snapshot.
+	// Regal rats included (by request) - rat kings and their army reset with the round too. Tom
+	// (the mapped named mouse) is re-allowed below - he's a station pet, not migration spam.
+	/mob/living/basic/mouse,
+	/mob/living/basic/snail,
+	/mob/living/basic/stoat,
+	/mob/living/basic/spider/maintenance,
+	/mob/living/basic/regal_rat,
+)) - typecacheof(list(
+	/mob/living/basic/mouse/brown/tom,
 )))
 
 /proc/generate_persistent_type_allowlist()
