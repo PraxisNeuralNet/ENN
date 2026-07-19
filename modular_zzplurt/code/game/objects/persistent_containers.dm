@@ -732,6 +732,129 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	update_appearance()
 
 // =================================================================================================
+// Radios / headsets (encryption keys)
+// =================================================================================================
+// Encryption keys are REFERENCE vars (keyslot, headsets add keyslot2), not storage contents, so
+// the generic inventory walk never saw them: a reloaded radio rebuilt only its TYPE-DEFAULT key
+// and every player-installed key (bowman upgrades, syndicate, binary...) deleted (twenty-seventh
+// pass). The saved slots are authoritative in both directions - installed keys come back
+// (allowlist-gated), and a slot the player stripped stays empty instead of regenerating its
+// default. special_channels rides along because make_syndie() installs the key + flag as a pair.
+
+/obj/item/radio/has_persistent_item_state()
+	return TRUE
+
+/obj/item/radio/serialize_persistent(depth = 1)
+	. = ..()
+	var/list/radio_data = list()
+	// null is meaningful (slot deliberately empty), so the key is ALWAYS present in the record.
+	radio_data["keyslot"] = keyslot ? "[keyslot.type]" : null
+	if(special_channels != initial(special_channels))
+		radio_data["special_channels"] = special_channels
+	.["radio"] = radio_data
+
+/obj/item/radio/headset/serialize_persistent(depth = 1)
+	. = ..()
+	var/list/radio_data = .["radio"]
+	if(islist(radio_data))
+		radio_data["keyslot2"] = keyslot2 ? "[keyslot2.type]" : null
+
+/// Reconcile one key slot var ("keyslot"/"keyslot2") against its saved record entry. Missing
+/// entry (legacy record) keeps whatever Initialize built; a null entry empties the slot; a typed
+/// entry replaces the slot's occupant unless it already matches.
+/proc/apply_persistent_radio_key(obj/item/radio/radio, slot_name, list/radio_data)
+	if(!(slot_name in radio_data))
+		return
+	var/saved_type = radio_data[slot_name]
+	var/obj/item/encryptionkey/current = radio.vars[slot_name]
+	if(isnull(saved_type))
+		if(current)
+			radio.vars[slot_name] = null
+			qdel(current)
+		return
+	var/key_path = istext(saved_type) ? text2path(saved_type) : null
+	if(!ispath(key_path, /obj/item/encryptionkey) || !is_persistent_type_allowed(key_path))
+		return
+	if(current?.type == key_path)
+		return
+	if(current)
+		radio.vars[slot_name] = null
+		qdel(current)
+	radio.vars[slot_name] = new key_path()
+
+/obj/item/radio/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	var/list/radio_data = data["radio"]
+	if(!islist(radio_data))
+		return
+	apply_persistent_radio_key(src, "keyslot", radio_data)
+	if(isnum(radio_data["special_channels"]))
+		special_channels = radio_data["special_channels"]
+	recalculateChannels()
+
+/obj/item/radio/headset/deserialize_persistent(list/data, depth = 1)
+	// keyslot2 is applied BEFORE the base pass so its single recalculateChannels() (which also
+	// rebuilds key-granted languages) sees both slots populated.
+	var/list/radio_data = data["radio"]
+	if(islist(radio_data))
+		apply_persistent_radio_key(src, "keyslot2", radio_data)
+	return ..()
+
+// =================================================================================================
+// Uniform accessories (armbands, badges, webbing...)
+// =================================================================================================
+// Accessories live in the uniform's attached_accessories list (references + raw contents), not in
+// storage, so no pipeline captured them and every attached accessory vanished on reload (the gap
+// documented in the twenty-second pass, closed in the twenty-eighth). Full nested records so a
+// storage accessory (webbing) keeps its stored items; re-attachment goes through the real
+// attach_accessory() mutator so overlays/signals/storage handoff all rebuild themselves.
+
+/obj/item/clothing/under/has_persistent_item_state()
+	return TRUE // floor uniforms round-trip too (incl. types that spawn accessories at Init)
+
+/obj/item/clothing/under/serialize_persistent(depth = 1)
+	. = ..()
+	// ALWAYS present (like "contents"), so a deliberately de-accessorized uniform is
+	// authoritative on restore instead of regenerating any type-default accessories.
+	var/list/accessory_records = list()
+	if(depth < PERSISTENT_MAX_RECURSION_DEPTH)
+		for(var/obj/item/clothing/accessory/accessory as anything in attached_accessories)
+			var/list/record = accessory.serialize_persistent(depth + 1)
+			if(record)
+				accessory_records += list(record)
+	.["accessories"] = accessory_records
+
+/obj/item/clothing/under/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	var/list/accessory_records = data["accessories"]
+	if(!islist(accessory_records))
+		return // legacy record (pre-accessory format) - keep whatever the type spawned
+	// Saved set is authoritative; SAFETY VALVE as everywhere - never strip on a garbage list.
+	if(!persistent_records_restorable(accessory_records))
+		log_world("PERSISTENT_MAP: untrustworthy accessory record for [src]; keeping existing accessories.")
+		return
+	for(var/obj/item/clothing/accessory/stale as anything in LAZYLISTDUPLICATE(attached_accessories))
+		remove_accessory(stale, update = FALSE)
+		qdel(stale)
+	for(var/list/record as anything in accessory_records)
+		if(!islist(record))
+			continue
+		try
+			// Create through the standard allowlist-gated pipeline (a turf destination just
+			// places it loose), which also restores a webbing's stored items; then re-attach.
+			var/obj/item/clothing/accessory/accessory = restore_persistent_item(record, get_turf(src) || loc || src, depth + 1)
+			if(isnull(accessory))
+				continue
+			if(!istype(accessory))
+				qdel(accessory)
+				continue
+			if(!attach_accessory(accessory, attach_message = FALSE))
+				log_world("PERSISTENT_MAP: accessory [accessory.type] refused to re-attach to restored [src]; left loose.")
+		catch(var/exception/accessory_error)
+			log_world("PERSISTENT_MAP: accessory restore failed on [src]: [accessory_error]")
+	update_appearance()
+
+// =================================================================================================
 // MOD suits (modules, core, cell)
 // =================================================================================================
 // A MOD's interior rides its serialize_persistent() record: "mod_loadout" owns core/cell/modules,
