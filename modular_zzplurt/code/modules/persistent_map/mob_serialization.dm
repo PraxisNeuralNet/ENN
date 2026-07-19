@@ -177,9 +177,11 @@
 // =================================================================================================
 
 /// Collect item records for everything held/worn (a mob) or stored (a container). Worn body parts,
-/// abstract items and prosthetics are excluded by get_equipped_items()'s defaults. Containers are
-/// STORAGE-AWARE (BUG #1): only items in the storage datum's real_location are captured - never a
-/// MOD control's parts/core/modules, which live in its raw contents.
+/// abstract items and prosthetics are excluded by get_equipped_items()'s defaults. INCLUDE_POCKETS
+/// is required (twenty-second pass): without it the human override STRIPS l_store/r_store/s_store
+/// from the list, so pocket and suit-storage items were never serialized and vanished on reload.
+/// Containers are STORAGE-AWARE (BUG #1): only items in the storage datum's real_location are
+/// captured - never a MOD control's parts/core/modules, which live in its raw contents.
 /proc/serialize_persistent_contents(atom/container, depth)
 	. = list()
 	if(depth > PERSISTENT_MAX_RECURSION_DEPTH)
@@ -187,7 +189,7 @@
 	var/list/items
 	if(ismob(container))
 		var/mob/mob_container = container
-		items = mob_container.get_equipped_items(INCLUDE_HELD)
+		items = mob_container.get_equipped_items(INCLUDE_HELD | INCLUDE_POCKETS)
 	else
 		var/atom/storage_loc = persistent_storage_location(container)
 		items = storage_loc.contents
