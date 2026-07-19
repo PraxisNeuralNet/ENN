@@ -123,6 +123,56 @@
 				// dock's original Initialize, before any shuttle landed on it.
 				"area_type" = dock.area_type ? "[dock.area_type]" : null,
 			))
+		// Blueprint-built areas + player-renamed areas (thirtieth pass): TGM saves areas by TYPE
+		// only, so custom areas (instances of a shared base type - their cells merge into one
+		// nameless blob on reload) and any player-set area name were lost every boot. Record each
+		// custom area's identity + member turfs on this level, and a bare type+name for renamed
+		// MAPPED areas, anchored at their first member turf. ("area_type" key: collect writes the
+		// anchor TURF's type into "type" itself.)
+		for(var/area/custom_area as anything in GLOB.custom_areas)
+			if(QDELETED(custom_area))
+				continue
+			var/turf/custom_anchor
+			var/list/member_coords = list()
+			for(var/list/zlevel_turfs as anything in custom_area.get_zlevel_turf_lists())
+				for(var/turf/member as anything in zlevel_turfs)
+					if(member.z != z)
+						continue
+					if(!custom_anchor)
+						custom_anchor = member
+					member_coords += member.x
+					member_coords += member.y
+				CHECK_TICK
+			if(!custom_anchor)
+				continue
+			collect_persistent_payload(custom_anchor, PERSISTENT_PAYLOAD_CUSTOM_AREA, list(
+				"area_type" = "[custom_area.type]",
+				"name" = custom_area.name,
+				"default_gravity" = custom_area.default_gravity,
+				"turfs" = member_coords,
+			))
+		for(var/area/renamed_area as anything in GLOB.areas)
+			if(QDELETED(renamed_area) || GLOB.custom_areas[renamed_area])
+				continue
+			if(renamed_area.name == initial(renamed_area.name))
+				continue
+			if(istype(renamed_area, /area/shuttle)) // fleet areas regenerate from templates
+				continue
+			var/turf/rename_anchor
+			for(var/list/zlevel_turfs as anything in renamed_area.get_zlevel_turf_lists())
+				for(var/turf/member as anything in zlevel_turfs)
+					if(member.z == z)
+						rename_anchor = member
+						break
+				if(rename_anchor)
+					break
+			if(!rename_anchor)
+				continue
+			collect_persistent_payload(rename_anchor, PERSISTENT_PAYLOAD_AREA_RENAME, list(
+				"area_type" = "[renamed_area.type]",
+				"name" = renamed_area.name,
+			))
+			CHECK_TICK
 		var/list/level_payloads = payload_collector
 		payload_collector = null
 		if(!map_text)

@@ -1005,12 +1005,17 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 				continue
 			var/kind = entry["kind"]
 			// Turf-targeted / creation kinds first: no object matching involved.
-			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK)
+			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK || kind == PERSISTENT_PAYLOAD_CUSTOM_AREA || kind == PERSISTENT_PAYLOAD_AREA_RENAME)
 				try
-					if(kind == PERSISTENT_PAYLOAD_TURF_DECALS)
-						tile.apply_persistent_decals(data)
-					else
-						restore_persistent_stationary_dock(tile, data)
+					switch(kind)
+						if(PERSISTENT_PAYLOAD_TURF_DECALS)
+							tile.apply_persistent_decals(data)
+						if(PERSISTENT_PAYLOAD_STATIONARY_DOCK)
+							restore_persistent_stationary_dock(tile, data)
+						if(PERSISTENT_PAYLOAD_CUSTOM_AREA)
+							restore_persistent_custom_area(tile, data, z)
+						if(PERSISTENT_PAYLOAD_AREA_RENAME)
+							restore_persistent_area_rename(tile, data)
 					applied++
 				catch(var/exception/turf_error)
 					failed++
@@ -1107,6 +1112,68 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		tile.levelupdate()
 		CHECK_TICK
 	log_world("PERSISTENT_MAP: z[z] payload restore complete - [applied] payload entries applied, [tiers_applied] machine part sets, [material_stores_applied] machine material stores, [doors_applied] door states, [failed] failures (see lines above).")
+
+/// Recreate a blueprint-built custom area from its payload record (thirtieth pass). Mirrors
+/// create_area()'s creation path exactly, and runs after atoms init - the same world state
+/// runtime blueprint use sees. Trust boundary: area type validated (never shuttle/space), name
+/// sanitized, member coordinates clamped and capped. The DMM loader parked these turfs in a
+/// merged per-TYPE instance; set_turfs_to_area() lifts them out and the emptied donor is qdel'd,
+/// mirroring create_area()'s own epilogue.
+/datum/controller/subsystem/persistence/proc/restore_persistent_custom_area(turf/anchor, list/data, z)
+	var/area_path = text2path(data["area_type"])
+	if(!ispath(area_path, /area) || ispath(area_path, /area/shuttle) || ispath(area_path, /area/space))
+		log_world("PERSISTENT_MAP: rejected custom area type [data["area_type"]] at [AREACOORD(anchor)].")
+		return
+	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
+	if(!clean_name)
+		return
+	var/list/coords = data["turfs"]
+	if(!islist(coords) || length(coords) < 2 || length(coords) % 2)
+		return
+	var/list/turf/members = list()
+	for(var/i in 1 to min(length(coords), PERSISTENT_MAX_AREA_TURFS * 2) step 2)
+		var/member_x = coords[i]
+		var/member_y = coords[i + 1]
+		if(!isnum(member_x) || !isnum(member_y))
+			continue
+		var/turf/member = locate(clamp(round(member_x), 1, world.maxx), clamp(round(member_y), 1, world.maxy), z)
+		if(member)
+			members += member
+	if(!length(members))
+		return
+	var/area/new_area = new area_path
+	new_area.AddComponent(/datum/component/custom_area)
+	new_area.setup(clean_name)
+	if(isnum(data["default_gravity"]))
+		new_area.default_gravity = data["default_gravity"]
+	GLOB.custom_areas[new_area] = TRUE
+	require_area_resort()
+	var/list/area/affected_areas = list()
+	set_turfs_to_area(members, new_area, affected_areas)
+	new_area.reg_in_areas_in_z()
+	if(new_area.static_lighting)
+		new_area.create_area_lighting_objects()
+	for(var/donor_name in affected_areas)
+		var/area/donor = affected_areas[donor_name]
+		for(var/obj/machinery/door/firedoor/firelock as anything in donor.firedoors)
+			firelock.CalculateAffectingAreas()
+		if(!donor.has_contained_turfs())
+			qdel(donor)
+
+/// Re-apply a player-set NAME onto a mapped area instance (thirtieth pass). The anchor turf's
+/// area must still be the recorded TYPE - if the geometry drifted between save and load, keeping
+/// the default name beats renaming the wrong room.
+/datum/controller/subsystem/persistence/proc/restore_persistent_area_rename(turf/anchor, list/data)
+	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
+	if(!clean_name)
+		return
+	var/area/target_area = get_area(anchor)
+	if(!target_area || "[target_area.type]" != data["area_type"])
+		return
+	if(target_area.name == clean_name)
+		return
+	target_area.name = clean_name
+	require_area_resort()
 
 /// Recreate a station stationary dock that was occluded by a docked shuttle at save time (its
 /// tile was in a shuttle area, so SAVE_SHUTTLEAREA_IGNORE nooped it - BUG #7 v3). Values come off

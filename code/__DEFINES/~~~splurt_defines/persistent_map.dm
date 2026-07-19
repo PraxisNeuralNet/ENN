@@ -43,6 +43,12 @@
 #define PERSISTENT_PAYLOAD_SHELF_CRATES "shelf_crates" // cargo shelf crate records (slot-loaded closets)
 #define PERSISTENT_PAYLOAD_STATIONARY_DOCK "stationary_dock" // station docks occluded by a docked shuttle at save time (BUG #7 v3)
 #define PERSISTENT_PAYLOAD_IV_DRIP "iv_drip" // IV drip attached container record (nineteenth pass)
+#define PERSISTENT_PAYLOAD_CUSTOM_AREA "custom_area" // blueprint-built area: type/name/member turfs (thirtieth pass)
+#define PERSISTENT_PAYLOAD_AREA_RENAME "area_rename" // player-renamed mapped area: type/name (thirtieth pass)
+/// Cap on member-turf COORDINATE PAIRS restored for one custom area (blueprints cap rooms at
+/// BP_MAX_ROOM_SIZE=300 turfs but areas can be expanded repeatedly; a tampered file must not
+/// be able to swallow a whole z-level into one custom area).
+#define PERSISTENT_MAX_AREA_TURFS 2000
 
 /// Hard caps for the actor layer's security clamps (design sec 8.5, sec 12.11). A tampered file
 /// must not be able to mint god-mobs, negative health, or unbounded nesting.
