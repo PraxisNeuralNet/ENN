@@ -184,6 +184,26 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		restore_persistent_item(item_data, src, 1)
 
 // =================================================================================================
+// Light fixtures
+// =================================================================================================
+
+/// Hand-built lights finish construction as the /empty SUBTYPES (light_construct.dm) whose type
+/// defaults are status = LIGHT_EMPTY / start_with_cell = FALSE; inserting the tube only changes
+/// runtime state. `status` wasn't a saved var, so every player-built light reloaded with its
+/// type-default EMPTY status - a dark tubeless fixture, reported as "hand built lights get
+/// deleted" (twenty-third pass). Saving status (a numeric define, DMM-safe) round-trips it; the
+/// initial()-diff keeps mapped lights' entries unchanged (their subtypes already default to the
+/// right status) and as a bonus a repaired /light/broken mapped fixture now stays repaired.
+/// brightness rides along so nonstandard tubes keep their output. The emergency-power CELL is a
+/// reference and stays out (charge never persists - SYSTEM.md sec 7); a reloaded built light
+/// simply has no backup cell, same as its /empty base.
+/obj/machinery/light/get_save_vars()
+	. = ..()
+	. += NAMEOF(src, status)
+	. += NAMEOF(src, brightness)
+	return .
+
+// =================================================================================================
 // Suit storage units
 // =================================================================================================
 
