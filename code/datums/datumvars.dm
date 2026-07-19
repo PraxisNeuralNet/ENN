@@ -18,6 +18,7 @@ GLOBAL_LIST_INIT(vv_var_blacklist, list(
 		return FALSE
 	vars[var_name] = var_value
 	datum_flags |= DF_VAR_EDITED
+	record_persistent_var_edit(var_name, var_value) // SPLURT EDIT ADDITION - PERSISTENT_MAP - remember hand-edited vars on atoms so the persistent snapshot re-saves them (persistent_containers.dm)
 	return TRUE
 
 /datum/proc/vv_get_var(var_name)

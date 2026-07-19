@@ -32,6 +32,26 @@
 		"tox" = get_tox_loss(),
 		"oxy" = get_oxy_loss(),
 	)
+	// Container round-trip (seventeenth pass): a body stored in a morgue tray / closet / body bag /
+	// crate used to restore pushed out ONTO the container's turf every round (the "morgue ejects
+	// its bodies" report). Record the OUTERMOST turf-level storage container's type so the restore
+	// can put the mob back inside a same-typed container standing on that tile. Only dumb storage
+	// structures qualify - machines (sleepers, cryopods, mechs) still restore onto the turf.
+	// Outermost wins so a body bag inside a morgue tray records the MORGUE (the bag itself is not
+	// DMM-visible inside the tray and does not survive; the body still goes back in the tray).
+	var/atom/holder = loc
+	var/atom/outermost_container
+	while(ismovable(holder))
+		if(istype(holder, /obj/structure/bodycontainer) || istype(holder, /obj/structure/closet))
+			outermost_container = holder
+		holder = holder.loc
+	if(outermost_container)
+		.["container_type"] = "[outermost_container.type]"
+	// Hand-edited (VV) vars (twentieth pass) - mobs ride the JSON layer, so their recorded edits
+	// travel on the record like contained items' do.
+	var/list/edited = serialize_persistent_edited_vars(src)
+	if(edited)
+		.["edited_vars"] = edited
 	var/list/inventory = serialize_persistent_contents(src, 1)
 	if(length(inventory))
 		.["contents"] = inventory
@@ -46,6 +66,10 @@
 		setMaxHealth(clamp(data["max_health"], 1, PERSISTENT_DAMAGE_CAP))
 	apply_persistent_damage(data)
 	updatehealth()
+	// Hand-edited (VV) vars (twentieth pass) - shared filtered applier (persistent_containers.dm).
+	// Before inventory restore, and subtype deserializes (carbon DNA etc.) still run after and win
+	// where they own a var (a carbon's name comes from dna.real_name, as it should).
+	apply_persistent_edited_vars(src, data["edited_vars"])
 	restore_persistent_contents(data)
 
 /// Overridable damage application. Base mobs use the four global loss channels; carbons override
@@ -90,6 +114,11 @@
 		for(var/datum/reagent/reagent as anything in reagents.reagent_list)
 			chems += list(list("type" = "[reagent.type]", "volume" = reagent.volume))
 		.["reagents"] = chems // always present when a reagents holder exists, so EMPTY stays empty
+	// Hand-edited (VV) vars (twentieth pass): items inside containers/inventories don't ride the
+	// DMM, so their recorded edits travel on the JSON record instead.
+	var/list/edited = serialize_persistent_edited_vars(src)
+	if(edited)
+		.["edited_vars"] = edited
 	// Only recurse into genuine storage so we don't try to "restore" e.g. a PDA's internal parts.
 	// The key is ALWAYS present for storage items (even empty), so an emptied container is
 	// authoritative on restore instead of regenerating its type-default contents.
@@ -111,6 +140,8 @@
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
 				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+	// Hand-edited (VV) vars (twentieth pass) - shared filtered applier (persistent_containers.dm).
+	apply_persistent_edited_vars(src, data["edited_vars"])
 
 /// Apply a serialize_persistent() record onto THIS already-existing item in place (the counterpart
 /// to restore_persistent_item(), which creates a new one). Used for items that the map/machinery

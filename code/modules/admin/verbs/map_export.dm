@@ -96,6 +96,22 @@ ADMIN_VERB(map_export, R_DEBUG, "Map Export", "Select a part of the map by coord
 		. += NAMEOF(src, damage_deflection)
 		. += NAMEOF(src, resistance_flags)
 
+	// SPLURT EDIT ADDITION - PERSISTENT_MAP: hand-edited (VV/buildmode) vars round-trip through
+	// the snapshot. Names were recorded by vv_edit_var(); values are re-filtered HERE at save time
+	// (scalars/flat lists only - the value may have changed since the edit), and the tracking list
+	// itself is saved so the edit persists across every reload. generate_tgm_metadata() then
+	// applies its own initial()-diff and issaved() filters on top, so a var edited back to its
+	// default quietly drops out. See persistent_containers.dm (twentieth pass).
+	if(length(persistent_edited_vars))
+		for(var/edited_name in persistent_edited_vars)
+			if(!istext(edited_name) || (edited_name in .) || GLOB.persistent_var_edit_denylist[edited_name])
+				continue
+			if(!(edited_name in vars) || !persistent_var_value_saveable(vars[edited_name]))
+				continue
+			. += edited_name
+		. += NAMEOF(src, persistent_edited_vars)
+	// SPLURT EDIT END
+
 	return .
 
 /atom/movable/get_save_vars()

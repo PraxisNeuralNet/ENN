@@ -42,10 +42,13 @@
 #define PERSISTENT_PAYLOAD_TURF_DECALS "turf_decals" // turf decal element parameter records
 #define PERSISTENT_PAYLOAD_SHELF_CRATES "shelf_crates" // cargo shelf crate records (slot-loaded closets)
 #define PERSISTENT_PAYLOAD_STATIONARY_DOCK "stationary_dock" // station docks occluded by a docked shuttle at save time (BUG #7 v3)
+#define PERSISTENT_PAYLOAD_IV_DRIP "iv_drip" // IV drip attached container record (nineteenth pass)
 
 /// Hard caps for the actor layer's security clamps (design sec 8.5, sec 12.11). A tampered file
 /// must not be able to mint god-mobs, negative health, or unbounded nesting.
 #define PERSISTENT_MAX_NAME_LEN 64
+/// Cap for a hand-edited (VV) text var restored off the JSON layer (descs run longer than names).
+#define PERSISTENT_MAX_EDITED_TEXT_LEN 512
 #define PERSISTENT_MAX_LAW_LEN 256
 #define PERSISTENT_MAX_RECURSION_DEPTH 8
 /// Upper bound applied to restored damage / charge values.

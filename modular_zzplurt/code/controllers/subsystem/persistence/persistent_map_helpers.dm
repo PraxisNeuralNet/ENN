@@ -14,6 +14,20 @@
 /proc/persistent_level_role(z)
 	return is_persistent_level(z) ? PERSISTENT_ROLE_STATION : null
 
+/// TRUE when the given area lives on a persistent level that was loaded FROM A SNAPSHOT this
+/// boot. Roundstart injection systems (SSarea_spawn datums, SSjob's scaling sec-equipment
+/// lockers) must skip such areas: whatever they spawned the round the snapshot was first taken
+/// is already baked into the map, so re-firing every boot duplicates lockers/vendors/landmarks
+/// endlessly. Non-station areas (ruins, away levels) always return FALSE - they regenerate each
+/// round and still need their spawns.
+/proc/is_persistent_snapshot_area(area/target)
+	if(!istype(target) || !SSmapping.persistent_station_loaded)
+		return FALSE
+	for(var/list/zlevel_turfs as anything in target.get_zlevel_turf_lists())
+		for(var/turf/area_turf as anything in zlevel_turfs)
+			return is_persistent_level(area_turf.z)
+	return FALSE
+
 /// Object typecache excluded from the persistent station snapshot.
 ///
 /// IMPORTANT: passing a custom blacklist to write_map() REPLACES its internal default, so we
@@ -36,20 +50,4 @@
 		blacklist += typecacheof(list(/obj/docking_port/mobile))
 	return blacklist
 
-/// Parsed, validated persistent-map manifest. Only ever constructed by load_persistent_manifest(),
-/// which guarantees version, dimensions and referenced files are all sane before this exists.
-/datum/persistent_map_manifest
-	/// Snapshot format version (always == PERSISTENT_MAP_VERSION once validated).
-	var/version
-	/// world.maxx / world.maxy the snapshot was taken at (load is size-locked to these).
-	var/saved_maxx
-	var/saved_maxy
-	/// Ordered level records: list("role", "ordinal", "file", "payloads", "traits", "shuttles", "staged_file").
-	var/list/levels = list()
-
-/// All level records for a role, in saved order (the save loop emits ascending ordinals).
-/datum/persistent_map_manifest/proc/records_for_role(role)
-	. = list()
-	for(var/list/record as anything in levels)
-		if(record["role"] == role)
-			. += list(record)
+/// Parse

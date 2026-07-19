@@ -56,6 +56,107 @@
 	return FALSE
 
 // =================================================================================================
+// Hand-edited (VV/buildmode) var persistence (twentieth pass)
+// =================================================================================================
+// "Variables edited on an object do not persist": the DMM layer only saves the get_save_vars()
+// whitelist, so an admin's VV customizations (name, desc, force, resistance, colours...) reset
+// every reload. The base vv_edit_var() (datumvars.dm, marked SPLURT EDIT) now calls
+// record_persistent_var_edit(); atoms remember WHICH vars were hand-edited and get_save_vars()
+// (map_export.dm, marked SPLURT EDIT) re-appends them. The tracking list itself is a flat string
+// list saved into the DMM, so the memory - and therefore the edit - survives EVERY reload, not
+// just the first. Values are filtered to scalars/flat lists at both record and save time so a
+// datum/mob reference can never bake garbage into the map, and a value returned to its initial()
+// is skipped by the normal metadata diff. Items living INSIDE containers/inventories don't ride
+// the DMM - their edits round-trip as an "edited_vars" block on their JSON item records
+// (mob_serialization.dm), applied through the same filters.
+
+/// Var names that never round-trip even when hand-edited: position/identity builtins the
+/// maploader must own, ref-holding builtins, and the persistence bookkeeping vars themselves.
+GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
+	"x" = TRUE, "y" = TRUE, "z" = TRUE, "loc" = TRUE, "tag" = TRUE,
+	"type" = TRUE, "parent_type" = TRUE, "vars" = TRUE, "contents" = TRUE,
+	"appearance" = TRUE, "overlays" = TRUE, "underlays" = TRUE,
+	"vis_contents" = TRUE, "vis_locs" = TRUE, "datum_flags" = TRUE,
+	"persistent_edited_vars" = TRUE, "persistent_stock_parts" = TRUE,
+	"persistent_machine_materials" = TRUE, "persistent_silo_materials" = TRUE,
+	"persistent_door_state" = TRUE,
+))
+
+/atom
+	/// Var NAMES hand-edited (VV/buildmode) on this atom. Flat string list - DMM-safe - and saved
+	/// itself, so edits keep persisting across every save/load cycle.
+	var/list/persistent_edited_vars
+
+/// TRUE when a value can ride the snapshot: null/number/text/typepath, or a FLAT list of those
+/// (assoc values included). Lists of lists are rejected - the DMM reader shreds them (BUGS sec 0) -
+/// and so is any datum/mob/icon reference.
+/proc/persistent_var_value_saveable(value)
+	if(isnull(value) || isnum(value) || istext(value) || ispath(value))
+		return TRUE
+	if(islist(value))
+		var/list/checking = value
+		for(var/entry in checking)
+			if(!(isnull(entry) || isnum(entry) || istext(entry) || ispath(entry)))
+				return FALSE
+			if(istext(entry) || ispath(entry))
+				var/assoc_value = checking[entry]
+				if(!(isnull(assoc_value) || isnum(assoc_value) || istext(assoc_value) || ispath(assoc_value)))
+					return FALSE
+		return TRUE
+	return FALSE
+
+/// Base no-op hook called by vv_edit_var() for every datum; only atoms track anything.
+/datum/proc/record_persistent_var_edit(var_name, var_value)
+	return
+
+/atom/record_persistent_var_edit(var_name, var_value)
+	if(!istext(var_name) || GLOB.persistent_var_edit_denylist[var_name])
+		return
+	if(!persistent_var_value_saveable(var_value))
+		// A ref was assigned - stop tracking rather than keeping a name the save filter drops.
+		LAZYREMOVE(persistent_edited_vars, var_name)
+		return
+	LAZYOR(persistent_edited_vars, var_name)
+
+/// Collect this atom's recorded hand-edits as a "name" -> value block for a JSON record (items in
+/// containers/inventories and mobs don't ride the DMM), or null. Same filters as the DMM side.
+/proc/serialize_persistent_edited_vars(atom/source)
+	if(!istype(source) || !length(source.persistent_edited_vars))
+		return null
+	var/list/edited = list()
+	for(var/edited_name in source.persistent_edited_vars)
+		if(!istext(edited_name) || GLOB.persistent_var_edit_denylist[edited_name])
+			continue
+		if(!(edited_name in source.vars))
+			continue
+		var/edited_value = source.vars[edited_name]
+		if(!persistent_var_value_saveable(edited_value))
+			continue
+		edited[edited_name] = islist(edited_value) ? deep_copy_list(edited_value) : edited_value
+	return length(edited) ? edited : null
+
+/// Apply a JSON record's hand-edit block onto a freshly restored atom. Trust-boundary data: only
+/// vars that EXIST on the type, aren't denylisted, pass issaved(), and hold scalar/flat-list
+/// values apply - exactly the classes of value the DMM layer has always been allowed to set, so
+/// this adds parity for contained items/mobs, not new capability. Text values are sanitized.
+/// Applied names re-record so the edit keeps round-tripping on future saves.
+/proc/apply_persistent_edited_vars(atom/target, list/edited_vars)
+	if(!istype(target) || !islist(edited_vars))
+		return
+	for(var/edited_name in edited_vars)
+		if(!istext(edited_name) || GLOB.persistent_var_edit_denylist[edited_name])
+			continue
+		if(!(edited_name in target.vars) || !issaved(target.vars[edited_name]))
+			continue
+		var/edited_value = edited_vars[edited_name]
+		if(!persistent_var_value_saveable(edited_value))
+			continue
+		if(istext(edited_value))
+			edited_value = sanitize_persistent_text(edited_value, PERSISTENT_MAX_EDITED_TEXT_LEN)
+		target.vars[edited_name] = edited_value
+		LAZYOR(target.persistent_edited_vars, edited_name)
+
+// =================================================================================================
 // Closets / crates / lockers
 // =================================================================================================
 
@@ -250,6 +351,48 @@
 	/// stock parts like power cells). Machines otherwise reload with their circuit's tier-1 defaults,
 	/// resetting every upgrade. Only written when something is actually upgraded.
 	var/list/persistent_stock_parts
+	/// Persistent-map snapshot of a LOCAL material container's contents ("[material typepath]" ->
+	/// amount; flat assoc of scalars - DMM-safe). Populated only for machine types that opt in via
+	/// get_persistent_material_container() (autolathe, etc. - the ore silo keeps its own bespoke
+	/// persistent_silo_materials for save compatibility). Consumed by the payload walk AFTER
+	/// stock-part restore, so upgraded matter-bin capacity is in place before re-insertion.
+	var/list/persistent_machine_materials
+
+/// The machine's own material container whose contents should persist, or null. Opt-in hook:
+/// only machines with a purely LOCAL store should return one - silo-linked machines (techfabs
+/// via remote_materials) must NOT, or the silo's materials would duplicate into local storage.
+/obj/machinery/proc/get_persistent_material_container()
+	return null
+
+/// The autolathe's sheets live in its own /datum/material_container and reloaded empty (report:
+/// "the autolathe isn't saving the materials that are put inside of it").
+/obj/machinery/autolathe/get_persistent_material_container()
+	return materials
+
+/// Re-insert saved materials into the machine's local container. Paths/amounts come off the
+/// trust-boundary file: path-validated, clamped, and capped to the container's free space
+/// (insert_amount_mat() refuses over-capacity inserts outright rather than partially filling).
+/obj/machinery/proc/apply_persistent_machine_materials()
+	var/list/mats = persistent_machine_materials
+	persistent_machine_materials = null
+	if(!islist(mats))
+		return
+	var/datum/material_container/holder = get_persistent_material_container()
+	if(!istype(holder))
+		return
+	for(var/mat_text in mats)
+		var/mat_path = text2path(mat_text)
+		var/amount = mats[mat_text]
+		if(!ispath(mat_path, /datum/material) || !isnum(amount) || amount <= 0)
+			continue
+		amount = min(amount, PERSISTENT_MAX_SILO_MATERIAL)
+		if(holder.max_amount)
+			amount = min(amount, holder.max_amount - holder.total_amount())
+		if(amount <= 0)
+			continue
+		var/datum/material/mat = GET_MATERIAL_REF(mat_path)
+		if(mat)
+			holder.insert_amount_mat(amount, mat)
 
 /obj/machinery/get_save_vars()
 	. = ..()
@@ -257,6 +400,18 @@
 	// applies before init so the panel sprite draws correctly on reload. (Added BEFORE the
 	// component_parts early-return: airlocks and other non-frame machines have no parts list.)
 	. += NAMEOF(src, panel_open)
+	// Local material container snapshot (also before the early return, for the same reason).
+	persistent_machine_materials = null
+	var/datum/material_container/mat_holder = get_persistent_material_container()
+	if(istype(mat_holder))
+		var/list/stored = list()
+		for(var/datum/material/stored_mat as anything in mat_holder.materials)
+			var/mat_amount = mat_holder.materials[stored_mat]
+			if(mat_amount > 0)
+				stored["[stored_mat.type]"] = mat_amount
+		if(length(stored))
+			persistent_machine_materials = stored
+			. += NAMEOF(src, persistent_machine_materials)
 	persistent_stock_parts = null
 	if(!length(component_parts))
 		return .
@@ -313,6 +468,37 @@
 				break
 	if(changed)
 		RefreshParts()
+
+// =================================================================================================
+// IV drips (nineteenth pass)
+// =================================================================================================
+// The hanging beaker/blood bag lives INSIDE the drip (the reagent_container var), which
+// write_map() never sees - drips reloaded empty and "deleted" whatever was attached. The
+// container's full item record (type, reagents, custom name/colour) rides the payload sidecar
+// and is re-attached exactly like item_interaction() does.
+
+/obj/machinery/iv_drip/get_save_vars()
+	. = ..()
+	if(reagent_container)
+		SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_IV_DRIP, reagent_container.serialize_persistent(2))
+	return .
+
+/// Rebuild and re-attach the saved container. Goes through the normal allowlisted restore
+/// pipeline, then re-validates against the drip's own container typecache (trust-boundary data)
+/// before hooking it up; a rejected item drops on the tile rather than deleting.
+/obj/machinery/iv_drip/proc/apply_persistent_iv_container(list/record)
+	if(!islist(record) || reagent_container || use_internal_storage)
+		return
+	var/obj/item/container = restore_persistent_item(record, src, 1)
+	if(!container)
+		return
+	if(!is_type_in_typecache(container, drip_containers) && !IS_EDIBLE(container))
+		log_world("PERSISTENT_MAP: rejected IV drip container [container.type] at [AREACOORD(src)]; left on the tile.")
+		container.forceMove(drop_location())
+		return
+	container.forceMove(src)
+	reagent_container = container
+	update_appearance(UPDATE_ICON)
 
 // =================================================================================================
 // Buttons -> blast door linkage (flat vars: DMM-safe, unchanged)
@@ -717,6 +903,10 @@
 						var/obj/structure/cargo_shelf/shelf = target
 						if(istype(shelf))
 							shelf.apply_persistent_shelf_crates(data)
+					if(PERSISTENT_PAYLOAD_IV_DRIP)
+						var/obj/machinery/iv_drip/drip = target
+						if(istype(drip))
+							drip.apply_persistent_iv_container(data)
 					else
 						log_world("PERSISTENT_MAP: unknown payload kind [kind] at ([entry["x"]],[entry["y"]],[z]); skipped.")
 				applied++
@@ -730,6 +920,7 @@
 	// tiers/door state (the report-#3 tier-loss failure mode).
 	var/tiers_applied = 0
 	var/doors_applied = 0
+	var/material_stores_applied = 0
 	for(var/obj/machinery/machine as anything in SSmachines.get_all_machines())
 		if(machine.z != z)
 			continue
@@ -740,6 +931,15 @@
 			catch(var/exception/parts_error)
 				failed++
 				log_world("PERSISTENT_MAP: stock-part restore failed on [machine] at [AREACOORD(machine)]: [parts_error]")
+		// AFTER stock parts: matter-bin upgrades set the container's capacity, and the insert
+		// clamps to free space - restoring materials first would drop the overflow.
+		if(machine.persistent_machine_materials)
+			try
+				machine.apply_persistent_machine_materials()
+				material_stores_applied++
+			catch(var/exception/mats_error)
+				failed++
+				log_world("PERSISTENT_MAP: material restore failed on [machine] at [AREACOORD(machine)]: [mats_error]")
 		if(istype(machine, /obj/machinery/door))
 			var/obj/machinery/door/door = machine
 			if(door.persistent_door_state)
@@ -750,7 +950,20 @@
 					failed++
 					log_world("PERSISTENT_MAP: door-state restore failed on [door] at [AREACOORD(door)]: [door_error]")
 		CHECK_TICK
-	log_world("PERSISTENT_MAP: z[z] payload restore complete - [applied] payload entries applied, [tiers_applied] machine part sets, [doors_applied] door states, [failed] failures (see lines above).")
+	// Re-hide undertile objects (sixteenth pass - "satchels blowing up"): DMM-persisted underfloor
+	// objects (smuggler satchels, pressure plates...) loaded EXPOSED on top of their tile -
+	// turf/Initialize's levelupdate() runs before mapload contents are INITIALIZED_1, so the
+	// COMSIG_OBJ_HIDE that normally tucks them under the floor never reached them. An exposed
+	// satchel then meets ordinary hazards (maint fires, stray shots) and its firework/frag-grenade
+	// loot fire_acts -> detonate(), cratering the floor - damage that is PERMANENT on a persistent
+	// map. One levelupdate() per turf after atoms init re-sends the signal with the turf's real
+	// underfloor accessibility; every listener (undertile, pressure plates, plumbing, atmos
+	// machinery) applies state, not toggles, so re-sending is idempotent. This also self-heals
+	// satchels already exposed by older snapshots on their next load.
+	for(var/turf/tile as anything in Z_TURFS(z))
+		tile.levelupdate()
+		CHECK_TICK
+	log_world("PERSISTENT_MAP: z[z] payload restore complete - [applied] payload entries applied, [tiers_applied] machine part sets, [material_stores_applied] machine material stores, [doors_applied] door states, [failed] failures (see lines above).")
 
 /// Recreate a station stationary dock that was occluded by a docked shuttle at save time (its
 /// tile was in a shuttle area, so SAVE_SHUTTLEAREA_IGNORE nooped it - BUG #7 v3). Values come off

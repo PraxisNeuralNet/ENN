@@ -664,6 +664,15 @@ SUBSYSTEM_DEF(job)
 	for(var/i=equip_needed-5, i>0, i--)
 		if(GLOB.secequipment.len)
 			var/spawnloc = GLOB.secequipment[1]
+			// SPLURT EDIT ADDITION - PERSISTENT_MAP: secequipment landmarks are kept in the persistent
+			// snapshot (they must survive for this scaling to work at all), but the lockers spawned here
+			// in PREVIOUS rounds are baked into the map on the very same tiles - so a high-pop round would
+			// stack a brand-new locker on top of last round's copy. A persisted locker on the landmark's
+			// tile already satisfies this equipment slot; consume the spot without spawning.
+			if(SSmapping.persistent_station_loaded && (locate(/obj/structure/closet/secure_closet/security/sec) in spawnloc))
+				GLOB.secequipment -= spawnloc
+				continue
+			// SPLURT EDIT END
 			new /obj/structure/closet/secure_closet/security/sec(spawnloc)
 			GLOB.secequipment -= spawnloc
 		else //We ran out of spare locker spawns!

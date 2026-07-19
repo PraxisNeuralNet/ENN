@@ -21,6 +21,17 @@ SUBSYSTEM_DEF(minor_mapping)
 #if defined(MAP_TEST) || defined(UNIT_TESTS)
 	return SS_INIT_NO_NEED
 #else
+	// SPLURT EDIT ADDITION - PERSISTENT_MAP: minor mapping is a roundstart INJECTION system, balanced
+	// for a world that resets every round. On a snapshot-loaded persistent station it compounds:
+	// satchels are real items (saved into the snapshot - +2 more under the floors every round) and
+	// vermin are living mobs (saved by the JSON actor layer - +N more every round, the "pets
+	// duplicating" class of bug), while weakpoints re-seed fresh crack chains whose floor damage is
+	// PERMANENT here rather than wiped at round end. The world already remembers last round's
+	// satchels/vermin/cracks-turned-craters; injecting more every boot is pure accumulation.
+	if(SSmapping.persistent_station_loaded)
+		log_world("PERSISTENT_MAP: persistent snapshot loaded; skipping minor mapping injections (vermin, satchels, weakpoints).")
+		return SS_INIT_NO_NEED
+	// SPLURT EDIT END
 	trigger_migration(CONFIG_GET(number/mice_roundstart))
 	place_satchels(satchel_amount = 2)
 	var/weakpoint_spawns = 3

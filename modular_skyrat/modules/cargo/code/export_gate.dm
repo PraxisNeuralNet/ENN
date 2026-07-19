@@ -338,6 +338,12 @@
 		var/area/found_area = GLOB.areas_by_type[area_type]
 		if(!found_area)
 			continue
+		// SPLURT EDIT ADDITION - PERSISTENT_MAP: this override skips the base try_spawn, so it needs
+		// its own copy of the snapshot duplication guard - otherwise a fresh flatpack lands in cargo
+		// every boot even though the original (or the gate built from it) persists in the map.
+		if(is_persistent_snapshot_area(found_area))
+			return
+		// SPLURT EDIT END
 		available_turfs = SSarea_spawn.get_turf_candidates(found_area, mode)
 		if(LAZYLEN(available_turfs))
 			break

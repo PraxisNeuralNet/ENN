@@ -517,6 +517,7 @@
 			. = TRUE
 	if(!isnull(.))
 		datum_flags |= DF_VAR_EDITED
+		record_persistent_var_edit(var_name, var_value) // SPLURT EDIT ADDITION - PERSISTENT_MAP - special-cased edits (anchored, glide_size...) return before the base hook
 		return
 
 	return ..()

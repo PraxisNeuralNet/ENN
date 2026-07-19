@@ -285,6 +285,12 @@ SUBSYSTEM_DEF(area_spawn)
 		var/area/found_area = GLOB.areas_by_type[area_type]
 		if(!found_area)
 			continue
+		// SPLURT EDIT ADDITION - PERSISTENT_MAP: on a snapshot-loaded station this datum's spawn is
+		// already baked into the map from the round it first fired - re-firing every boot duplicated
+		// lockers/vendors/landmarks endlessly (and pets are owned by the JSON actor layer instead).
+		if(is_persistent_snapshot_area(found_area))
+			return
+		// SPLURT EDIT END
 		available_turfs = SSarea_spawn.get_turf_candidates(found_area, mode)
 		if(LAZYLEN(available_turfs))
 			break
@@ -337,6 +343,12 @@ SUBSYSTEM_DEF(area_spawn)
 		if(!found_area)
 			continue
 
+		// SPLURT EDIT ADDITION - PERSISTENT_MAP: same duplication guard as /datum/area_spawn above -
+		// the over-spawned item from the snapshot's first round persists in the map (or wherever
+		// players moved it); respawning a fresh one every boot duplicates it.
+		if(is_persistent_snapshot_area(found_area))
+			return
+		// SPLURT EDIT END
 		for (var/list/zlevel_turfs as anything in found_area.get_zlevel_turf_lists())
 			for(var/turf/area_turf as anything in zlevel_turfs)
 				// Don't spawn if there's already a desired_atom here.

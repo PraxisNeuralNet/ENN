@@ -154,6 +154,17 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 /// Restore the saved actor layer. Runs from SSpersistence.Initialize(), after mapping + atoms init
 /// so turfs and item atoms can be created (ordering caveat: design sec 12.9).
 /datum/controller/subsystem/persistence/proc/load_persistent_mobs()
+	// LAYER-COHERENCE GUARD (fifteenth pass): the two layers are saved together and must LOAD
+	// together. The save side already enforces this (actor save is skipped when the map write
+	// fails), but the load side didn't: on any fallback boot (missing/corrupt/version- or
+	// size-mismatched manifest, staging failure), the SHIPPED map loads - complete with its
+	// mapped roundstart pets (mothroach, E-N, Renault...) - and restoring the JSON actors on
+	// top of it doubled every one of them. The doubled set was then re-saved at round end,
+	// making the duplication permanent. Actors restore ONLY onto the snapshot they were saved with.
+	if(!SSmapping.persistent_station_loaded)
+		if(fexists(PERSISTENT_MOB_FILE))
+			log_world("PERSISTENT_MAP: station loaded from shipped maps this boot; skipping actor restore so mapped roundstart mobs don't double (persistent_mobs.json left untouched).")
+		return
 	if(!fexists(PERSISTENT_MOB_FILE))
 		return
 	var/list/data = get_persistent_mobs_database().get()
@@ -256,6 +267,21 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 		if(landed_turf != spawn_turf && !istype(get_area(body), /area/centcom/wizard_station))
 			log_world("PERSISTENT_MAP: [claim_ckey]'s body was relocated to [AREACOORD(body)] during mind restore (antag spawn logistics); returning it to [AREACOORD(spawn_turf)].")
 			body.forceMove(spawn_turf)
+
+	// Container re-entry (seventeenth pass): put the body back INSIDE its saved storage container
+	// (morgue/crematorium tray, closet, body bag, crate) when a same-typed one stands on the saved
+	// tile - it used to be dumped on top of the morgue every reload. Class-gated to the same dumb
+	// storage structures the save side records (never instantiated from the file - we only ever
+	// match an object that already exists on the tile). Falls back to the turf when nothing
+	// matches (container destroyed/moved) and never fights a sanctioned relocation (wizard den).
+	var/container_path = text2path(record["container_type"])
+	if((ispath(container_path, /obj/structure/bodycontainer) || ispath(container_path, /obj/structure/closet)) && get_turf(body) == spawn_turf)
+		for(var/obj/structure/candidate in spawn_turf)
+			if(candidate.type != container_path)
+				continue
+			body.forceMove(candidate)
+			candidate.update_appearance()
+			break
 
 	return body
 
