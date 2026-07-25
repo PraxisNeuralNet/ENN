@@ -187,3 +187,25 @@
 	. += NAMEOF(src, paint_colour)
 	. += NAMEOF(src, rotation)
 	return .
+
+// --- Cobwebs: never on a persistent station (thirty-fourth pass, by request) ------------------
+// Cobwebs are not spawner-generated - every one of them is a hand-placed
+// /obj/effect/decal/cleanable/cobweb literal in the shipped station map (27 on BoxStation, 61 on
+// Meta, 174 on Kilo...). On a station that resets every round that is set dressing; on a PERSISTENT
+// station it is set dressing the crew has to clean exactly once and can never be rid of, because
+// any boot that falls back to the shipped map (discarded manifest, first boot on empty data/, a map
+// change) stamps the whole original set back down.
+//
+// So they are removed categorically rather than persisted: a cobweb that comes into existence
+// anywhere on a persistent level deletes itself at init. That covers all three arrival routes -
+// maploaded from the shipped map, restored out of a snapshot that predates this change, and spawned
+// at runtime. Non-persistent levels (ruins, lavaland, away missions) are untouched: they regenerate
+// every round, so their webs cost nothing and are part of the intended atmosphere.
+//
+// NOTE: this is decorative cobwebs ONLY. Spider-spun /obj/structure/spider/stickyweb is a
+// structure, not a decal, and is deliberately left alone - persisted maintenance spiders respinning
+// their webs is wanted behaviour.
+/obj/effect/decal/cleanable/cobweb/Initialize(mapload)
+	. = ..()
+	if(is_persistent_level(z))
+		return INITIALIZE_HINT_QDEL

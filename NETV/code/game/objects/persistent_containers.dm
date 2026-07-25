@@ -1051,6 +1051,9 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// Fleet reconciliation must wait for SSshuttle setup (incl. roundstart loads), so it runs at
 	// round start rather than here (persistent_shuttles.dm, BUG #7).
 	SSticker.OnRoundstart(CALLBACK(src, PROC_REF(reconcile_persistent_shuttles)))
+	// Techweb restore likewise waits for round start: SSpersistence has no dependency edge to
+	// SSresearch, so its techwebs are not guaranteed built yet (persistent_techweb.dm).
+	SSticker.OnRoundstart(CALLBACK(src, PROC_REF(restore_persistent_techweb)))
 	var/list/payload_files = SSmapping.persistent_loaded_payloads
 	if(!islist(payload_files) || !length(payload_files))
 		return
@@ -1214,20 +1217,34 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		return
 	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
 	if(!clean_name)
+		log_world("PERSISTENT_MAP: custom area at [AREACOORD(anchor)] has an unusable name ([json_encode(data["name"])]); not restored.")
 		return
 	var/list/coords = data["turfs"]
 	if(!islist(coords) || length(coords) < 2 || length(coords) % 2)
+		log_world("PERSISTENT_MAP: custom area '[clean_name]' at [AREACOORD(anchor)] has a malformed turf list ([islist(coords) ? "[length(coords)] entries" : "not a list"]); not restored.")
 		return
 	var/list/turf/members = list()
+	var/skipped_members = 0
 	for(var/i in 1 to min(length(coords), PERSISTENT_MAX_AREA_TURFS * 2) step 2)
 		var/member_x = coords[i]
 		var/member_y = coords[i + 1]
 		if(!isnum(member_x) || !isnum(member_y))
+			skipped_members++
 			continue
 		var/turf/member = locate(clamp(round(member_x), 1, world.maxx), clamp(round(member_y), 1, world.maxy), z)
-		if(member)
-			members += member
+		if(!member)
+			skipped_members++
+			continue
+		// create_area() refuses to swallow space or shuttle tiles; geometry can drift between save
+		// and load (a wall broken open onto space), so refuse them here too rather than dragging a
+		// space tile into a pressurised room.
+		var/area/member_area = get_area(member)
+		if(isspaceturf(member) || istype(member_area, /area/shuttle) || istype(member_area, /area/space))
+			skipped_members++
+			continue
+		members += member
 	if(!length(members))
+		log_world("PERSISTENT_MAP: custom area '[clean_name]' at [AREACOORD(anchor)] resolved NO usable member turfs out of [length(coords) / 2] saved; not restored.")
 		return
 	var/area/new_area = new area_path
 	new_area.AddComponent(/datum/component/custom_area)
@@ -1241,12 +1258,20 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	new_area.reg_in_areas_in_z()
 	if(new_area.static_lighting)
 		new_area.create_area_lighting_objects()
+	var/list/area/donor_list = list()
 	for(var/donor_name in affected_areas)
 		var/area/donor = affected_areas[donor_name]
+		donor_list += donor
 		for(var/obj/machinery/door/firedoor/firelock as anything in donor.firedoors)
 			firelock.CalculateAffectingAreas()
+	// create_area() fires this after reparenting; the restore was not, so anything keyed off area
+	// creation (the hazard_area component) never learned the room existed. Sent with a null creator,
+	// which the one listener tolerates - there is no player to attribute a boot-time restore to.
+	SEND_GLOBAL_SIGNAL(COMSIG_AREA_CREATED, new_area, donor_list, null)
+	for(var/area/donor as anything in donor_list)
 		if(!donor.has_contained_turfs())
 			qdel(donor)
+	log_world("PERSISTENT_MAP: custom area '[clean_name]' ([area_path]) restored at [AREACOORD(anchor)] with [length(members)] turfs[skipped_members ? ", [skipped_members] saved turfs unusable" : ""].")
 
 /// Re-apply a player-set NAME onto a mapped area instance (thirtieth pass). The anchor turf's
 /// area must still be the recorded TYPE - if the geometry drifted between save and load, keeping
@@ -1254,14 +1279,22 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 /datum/controller/subsystem/persistence/proc/restore_persistent_area_rename(turf/anchor, list/data)
 	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
 	if(!clean_name)
+		log_world("PERSISTENT_MAP: area rename at [AREACOORD(anchor)] has an unusable name ([json_encode(data["name"])]); not applied.")
 		return
 	var/area/target_area = get_area(anchor)
-	if(!target_area || "[target_area.type]" != data["area_type"])
+	if(!target_area)
+		log_world("PERSISTENT_MAP: area rename to '[clean_name]' at [AREACOORD(anchor)] found no area on the anchor tile; not applied.")
+		return
+	if("[target_area.type]" != data["area_type"])
+		// Geometry drifted, or a custom-area record earlier in this same payload pass already
+		// reparented the anchor tile. Renaming now would rename the WRONG room.
+		log_world("PERSISTENT_MAP: area rename to '[clean_name]' at [AREACOORD(anchor)] skipped - tile now belongs to [target_area.type], record expected [data["area_type"]].")
 		return
 	if(target_area.name == clean_name)
 		return
 	target_area.name = clean_name
 	require_area_resort()
+	log_world("PERSISTENT_MAP: area rename applied at [AREACOORD(anchor)] - [target_area.type] is now '[clean_name]'.")
 
 /// Recreate a station stationary dock that was occluded by a docked shuttle at save time (its
 /// tile was in a shuttle area, so SAVE_SHUTTLEAREA_IGNORE nooped it - BUG #7 v3). Values come off

@@ -263,18 +263,52 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	// ANYWHERE in the physical or mind restore below must never cost the player their lobby offer
 	// (BUG #5: registration used to sit after the body deserialize, so any restore runtime -
 	// guaranteed while the container/DNA bugs raged - silently ate the claim).
+	// A CORPSE IS NOT A CLAIMABLE BODY (thirty-fourth pass): dead is dead on a persistent station,
+	// so a body that was dead at save time is restored as a corpse (below) and must not be OFFERED
+	// at the lobby - accepting it would drop the player into an unplayable dead mob. Read straight
+	// off the RECORD, not the spawned body, so this keeps the BUG #5 property that the claim
+	// decision never depends on the physical restore succeeding.
+	//
+	// ONLY the offer is suppressed. The ckey stamp and the dormant-mind rebuild below still run for
+	// a corpse, deliberately: the save side only writes a mind record for a carbon that has an owner
+	// ckey (live key or persistent_owner_ckey stamp), so skipping the stamp would make the NEXT
+	// round-end save drop the mind entirely and the body would lose its job/antag/skill history for
+	// good - a body recovered by cloning or a revival surgery two shifts later would come back blank.
+
+	// Resolved once here because BOTH the death decision and the container re-entry below need it.
+	var/container_path = text2path(record["container_type"])
+	// The morgue is final: an explicit saved flag wins, but a body recorded inside a morgue tray,
+	// the crematorium or a body bag counts as dead even without one. That is what keeps the corpses
+	// in a PRE-EXISTING snapshot (written before the flag existed) from getting their one free round
+	// of standing up before the next save catches them.
+	var/saved_dead = !!record["dead"] || is_persistent_morgue_container(container_path)
 	var/claim_ckey
 	if(iscarbon(body) && islist(record["mind"]) && record["ckey"])
 		claim_ckey = ckey(record["ckey"])
 		// The stamp keeps the body's mind + claimability when re-saved unclaimed (sec 8.6 step 5).
 		body.persistent_owner_ckey = claim_ckey
-		register_claimable_body(claim_ckey, body)
+		if(!saved_dead)
+			register_claimable_body(claim_ckey, body)
 
 	// Physical restore, contained: a degraded-but-claimable body beats no body.
 	try
 		body.deserialize_persistent(record)
 	catch(var/exception/body_error)
 		log_world("PERSISTENT_MAP: physical restore of [body.type] at [AREACOORD(spawn_turf)] partially failed: [body_error]")
+
+	// Re-assert death LAST, after every restore stage that touches health (limb damage, organs,
+	// set_species) has run its own updatehealth(). Doing it here rather than inside
+	// deserialize_persistent() means a partially-failed physical restore still yields a corpse
+	// rather than a walking one. death() (not a bare set_stat) so the mob lands in
+	// GLOB.dead_mob_list, gets its timeofdeath, stops its heart/breathing and attaches rot like
+	// any other death; update_stat() is a no-op on an already-DEAD mob, so nothing later revives it.
+	// The deathgasp emote and death moodlets go nowhere - this runs at SSpersistence init, long
+	// before any player is in the world.
+	if(saved_dead && body.stat != DEAD)
+		try
+			body.death()
+		catch(var/exception/death_error)
+			log_world("PERSISTENT_MAP: could not re-apply death to restored [body.type] at [AREACOORD(spawn_turf)]: [death_error]")
 
 	// Player carbon: rebuild a DORMANT mind (no client/key) for the opt-in offer.
 	// transfer_to() onto a clientless body leaves the mind keyless, so it is an inert NPC carrying a
@@ -307,7 +341,6 @@ GLOBAL_LIST_INIT(persistent_type_denylist, typecacheof(list(
 	// storage structures the save side records (never instantiated from the file - we only ever
 	// match an object that already exists on the tile). Falls back to the turf when nothing
 	// matches (container destroyed/moved) and never fights a sanctioned relocation (wizard den).
-	var/container_path = text2path(record["container_type"])
 	if((ispath(container_path, /obj/structure/bodycontainer) || ispath(container_path, /obj/structure/closet)) && get_turf(body) == spawn_turf)
 		for(var/obj/structure/candidate in spawn_turf)
 			if(candidate.type != container_path)

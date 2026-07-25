@@ -50,6 +50,14 @@
 /// be able to swallow a whole z-level into one custom area).
 #define PERSISTENT_MAX_AREA_TURFS 2000
 
+// --- R&D techweb layer (thirty-third pass) -------------------------------------------------------
+/// The station science techweb's researched nodes + banked points (persistent_techweb.dm).
+#define PERSISTENT_TECHWEB_FILE "data/persistent_techweb.json"
+/// Techweb snapshot format version; mismatches are discarded safely like the other layers.
+#define PERSISTENT_TECHWEB_VERSION 1
+/// Clamp for a restored research point balance (a tampered file must not mint infinite points).
+#define PERSISTENT_MAX_RESEARCH_POINTS 100000000
+
 /// Hard caps for the actor layer's security clamps (design sec 8.5, sec 12.11). A tampered file
 /// must not be able to mint god-mobs, negative health, or unbounded nesting.
 #define PERSISTENT_MAX_NAME_LEN 64

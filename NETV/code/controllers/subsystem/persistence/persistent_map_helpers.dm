@@ -24,9 +24,25 @@
 /// data, or the round after the base was launched to the mining site). The mobile port stays
 /// blacklisted either way - a baked port is inert (register() never runs for it), so a persisted
 /// base's console reads "Missing" until the room is next respawned from template.
+///
+/// ESCAPE PODS (thirty-fourth pass, by request): the four pod areas join the exemption for the same
+/// reason the aux base did - a pod is a room the crew furnishes, loots and rebuilds, and stamping
+/// the template over it every boot reset all of that while the snapshot faithfully kept whatever
+/// they had moved out. THE SAME PORT TRADEOFF APPLIES, and it matters more here: a baked pod keeps
+/// its interior but its mobile port stays blacklisted (an unregistered port is inert), so a
+/// persisted pod is a ROOM, not a working escape vehicle, until the round after it is gone. This is
+/// a deliberate call for a small private-pop station where the pods are lived-in space rather than
+/// evacuation infrastructure - on a round that actually needs to evacuate, use the emergency
+/// shuttle. Wiping the pod's turfs (or a fresh data/) restores the normal template spawn.
 /// Accepts an area instance or an area typepath.
 /proc/is_persistent_exempt_shuttle_area(area_or_path)
-	var/static/list/exempt_typecache = typecacheof(list(/area/shuttle/auxiliary_base))
+	var/static/list/exempt_typecache = typecacheof(list(
+		/area/shuttle/auxiliary_base,
+		/area/shuttle/pod_1,
+		/area/shuttle/pod_2,
+		/area/shuttle/pod_3,
+		/area/shuttle/pod_4,
+	))
 	if(isarea(area_or_path))
 		var/area/area_instance = area_or_path
 		return exempt_typecache[area_instance.type]
@@ -46,6 +62,31 @@
 			return is_persistent_level(area_turf.z)
 	return FALSE
 
+/// TRUE for the container classes whose occupants are corpses by definition: morgue trays and the
+/// crematorium (/obj/structure/bodycontainer) and body bags. Used by the actor restore to keep the
+/// morgue's dead DEAD (thirty-fourth pass, by request).
+///
+/// The saved "dead" flag is the primary signal, but it only exists in records written since that
+/// flag was added - every PRE-EXISTING snapshot has corpses with no flag at all, and those bodies
+/// would each get exactly one round of standing up before the next save recorded them properly.
+/// Morgue containment closes that window immediately: a body someone zipped into a bag or slid into
+/// a tray is a corpse whatever the damage numbers add up to, and on a station where the morgue is
+/// the permanent record of who died, that inference is safe to make unconditionally.
+///
+/// Tradeoff, accepted deliberately: stuffing a LIVING person into a morgue tray or body bag and
+/// ending the round that way will now restore them dead. Takes a path (from the record) or an
+/// instance.
+/proc/is_persistent_morgue_container(container_or_path)
+	// Typed local before reading .type - the parameter is untyped because it accepts either form,
+	// and DM will not resolve a var on an untyped value (same shape as is_persistent_exempt_shuttle_area).
+	var/container_path = container_or_path
+	if(isatom(container_or_path))
+		var/atom/container_instance = container_or_path
+		container_path = container_instance.type
+	if(!ispath(container_path))
+		return FALSE
+	return ispath(container_path, /obj/structure/bodycontainer) || ispath(container_path, /obj/structure/closet/body_bag)
+
 /// Object typecache excluded from the persistent station snapshot.
 ///
 /// IMPORTANT: passing a custom blacklist to write_map() REPLACES its internal default, so we
@@ -60,6 +101,31 @@
 			- typecacheof(list(/obj/effect/decal, /obj/effect/turf_decal, /obj/effect/landmark))
 		// Extension point: junk we never want to freeze into the station snapshot.
 		blacklist += typecacheof(list(/obj/effect/decal/cleanable/blood/gibs, /obj/effect/decal/remains))
+		// Cobwebs are deleted at init on persistent levels (persistent_decals.dm); blacklisting them
+		// too means one can never be baked into a snapshot even if it somehow outlives that pass.
+		blacklist += typecacheof(list(/obj/effect/decal/cleanable/cobweb))
+		// Modular map scaffolding (tramstation / biodome maintenance modules + cages). These are
+		// plain /obj, so the /obj/effect sweep above never caught them:
+		//  - modular_map_root normally deletes itself after stamping its room, but returns early
+		//    without deleting when its config/key is unset and survives any runtime mid-load. A
+		//    baked root re-rolls a RANDOM room over the crew's version on the next boot - it
+		//    replaces the room wholesale, crates and all. Never let one into a snapshot.
+		//  - modular_map_connector is never deleted at all; it is only read off the cached template
+		//    during preload_size() to compute the stamp offset, so the copies left standing in the
+		//    world are inert. They are also invisible and indestructible, i.e. clutter the crew has
+		//    no way to clear. The snapshot doesn't need them.
+		blacklist += typecacheof(list(/obj/modular_map_root, /obj/modular_map_connector))
+		// The gateway (by request). It is a 3x2 multi-tile INDESTRUCTIBLE machine that rebuilds its
+		// whole working state at Initialize - destination datum, GLOB.gateway_destinations entry,
+		// GLOB.the_gateway, portal bumper, portal visuals - and saves essentially nothing of its own
+		// (get_save_vars gives it req_access/id_tag/anchored and nothing more). Freezing that frame
+		// into the snapshot preserves no player-meaningful state while permanently pinning an
+		// unremovable multi-tile machine into the map at whatever coordinates it happened to hold.
+		// NOTE the consequence: the snapshot REPLACES the shipped map, so a persistent station has
+		// NO gateway at all - not a fresh one. The away-side /obj/machinery/gateway/away lives on a
+		// non-persistent level and is unaffected; the portal bumper is /obj/effect and was already
+		// covered by the sweep above.
+		blacklist += typecacheof(list(/obj/machinery/gateway))
 		// ALL mobile docking ports are excluded (BUG #7 v3): shuttles are template-spawned every
 		// round, and a baked mobile port can never function - register() is only called by
 		// action_load/variant LateInitializes, so a snapshotted port loads as an inert object

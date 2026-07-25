@@ -31,6 +31,14 @@
 		"fire" = get_fire_loss(),
 		"tox" = get_tox_loss(),
 		"oxy" = get_oxy_loss(),
+		// Death is NOT derivable from the damage record (thirty-fourth pass - "the morgue
+		// resurrects its dead"). update_stat() only kills below HEALTH_THRESHOLD_DEAD, but a mob
+		// dies at ANY health from asphyxiation in crit, brain death, organ failure, suicide or a
+		// defib timeout - and a corpse that was patched up post-mortem sits well above the
+		// threshold. Restoring damage alone therefore respawned those bodies CONSCIOUS. The other
+		// stat values (soft/hard crit, unconscious) ARE recomputed correctly from health, so only
+		// the dead flag has to ride the record.
+		"dead" = (stat == DEAD),
 	)
 	// Container round-trip (seventeenth pass): a body stored in a morgue tray / closet / body bag /
 	// crate used to restore pushed out ONTO the container's turf every round (the "morgue ejects

@@ -13,6 +13,11 @@
 	/// Mobile shuttle ids the snapshot expected per the manifest fleet inventory, consumed by the
 	/// round-start shuttle reconciliation pass (BUG #7).
 	var/list/persistent_expected_shuttles
+	/// TRUE only WHILE LoadGroup is stamping the snapshot into the world. persistent_station_loaded
+	/// is deliberately set after LoadGroup returns (it means "the load succeeded"), which is too
+	/// late for anything that runs DURING mapload - INITIALIZE_IMMEDIATE atoms in particular. Guards
+	/// that must fire mid-load check this as well (see the modular-map-root guard below).
+	var/persistent_snapshot_staging = FALSE
 
 /// Reads and validates the on-disk manifest. Returns a /datum/persistent_map_manifest only when
 /// the snapshot is fully trustworthy; otherwise returns null so the caller falls back to shipped
@@ -128,7 +133,9 @@
 	if(length(traits) != length(files))
 		traits = null
 
+	persistent_snapshot_staging = TRUE
 	LoadGroup(error_list, group_name, CUSTOM_MAP_PATH, files, traits, default_traits, height_autosetup = height_autosetup)
+	persistent_snapshot_staging = FALSE
 
 	// Record what actually loaded so the post-init passes can act on it: payload files in load
 	// order (consumed by SSpersistence.apply_persistent_world_payloads(), matched to persistent
@@ -141,3 +148,59 @@
 		if(islist(record["shuttles"]))
 			persistent_expected_shuttles |= record["shuttles"]
 	return TRUE
+
+// =================================================================================================
+// Modular map roots (tramstation / biodome) - thirty-fourth pass
+// =================================================================================================
+//
+// /obj/modular_map_root picks a RANDOM room .dmm out of a TOML config and stamps it over its own
+// footprint at mapload, then deletes itself (modular_map_loader.dm). Tramstation builds its whole
+// maintenance layout this way (~80 modules under _maps/map_files/tramstation/maintenance_modules/);
+// biodome uses it for its cages. That is fine on a station that resets - it is the map's variety
+// mechanism - but a snapshot has ALREADY baked the module that was rolled the first time, plus
+// everything the crew has built, looted and cleared out of it since. A root that stamps over a
+// loaded snapshot doesn't just respawn the crates: it deletes the room and replaces it with a
+// different one.
+//
+// Normally no root reaches a snapshot, because load_map() qdels itself when it finishes. But it
+// returns EARLY - without deleting - when config_file or key is unset, and a runtime anywhere in
+// the load (bad toml, empty module list) leaves it standing too. /obj/modular_map_root is a plain
+// /obj, so the blacklist's /obj/effect sweep never covered it: a stuck root used to bake straight
+// into the snapshot as a landmine that re-rolls the room on the NEXT boot, whenever the transient
+// failure clears. Both halves are closed - blacklisted from the save (persistent_map_helpers.dm)
+// and refused here at init.
+//
+// Overrides core's load_map() (a /proc/ declaration, so this is a legal same-type override and
+// modular includes win); the core body is replicated below the guard, same pattern as the
+// persistent load_roundstart override in persistent_shuttles.dm. Initialize() is deliberately NOT
+// the hook - core already overrides it on this type, so a second override there would be a
+// duplicate definition.
+/obj/modular_map_root/load_map()
+	// Both flags matter: INITIALIZE_IMMEDIATE means a baked root fires DURING LoadGroup, before
+	// persistent_station_loaded is set, so the staging flag is the one that catches it mid-load.
+	if((SSmapping.persistent_snapshot_staging || SSmapping.persistent_station_loaded) && is_persistent_level(z))
+		log_world("PERSISTENT_MAP: modular map root ([config_file || "no config"]/[key || "no key"]) at [AREACOORD(src)] suppressed - the snapshot already holds this room. Deleting the root instead of re-rolling the module over it.")
+		qdel(src, force = TRUE)
+		return
+	// --- core body, replicated verbatim, except that the two early returns now DELETE the root ---
+	// instead of leaving it standing. A root with no config_file or no key can never stamp anything,
+	// so keeping it alive only creates the stuck-root landmine described above.
+	var/turf/spawn_area = get_turf(src)
+
+	var/datum/map_template/map_module/map = new()
+
+	if(!config_file)
+		qdel(src, force = TRUE)
+		return
+
+	if(!key)
+		qdel(src, force = TRUE)
+		return
+
+	var/config = rustg_read_toml_file(config_file)
+
+	var/mapfile = config["directory"] + pick(config["rooms"][key]["modules"])
+
+	map.load(spawn_area, FALSE, mapfile)
+
+	qdel(src, force=TRUE)

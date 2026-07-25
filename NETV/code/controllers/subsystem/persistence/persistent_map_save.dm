@@ -44,6 +44,7 @@
 	. = write_persistent_map_files()
 	if(.)
 		save_persistent_mobs()
+		save_persistent_techweb() // R&D layer rides the same commit gate (persistent_techweb.dm)
 	else
 		log_world("PERSISTENT_MAP: map layer save failed; actor layer skipped so both layers stay in sync with the previous snapshot.")
 	map_saving = FALSE
@@ -129,6 +130,9 @@
 		// custom area's identity + member turfs on this level, and a bare type+name for renamed
 		// MAPPED areas, anchored at their first member turf. ("area_type" key: collect writes the
 		// anchor TURF's type into "type" itself.)
+		var/custom_areas_saved = 0
+		var/custom_areas_skipped = 0
+		var/renames_saved = 0
 		for(var/area/custom_area as anything in GLOB.custom_areas)
 			if(QDELETED(custom_area))
 				continue
@@ -144,6 +148,10 @@
 					member_coords += member.y
 				CHECK_TICK
 			if(!custom_anchor)
+				// The area exists in GLOB.custom_areas but reported no turfs on this level: either it
+				// lives entirely on another z, or its turf lists are stale/empty. Counted so the
+				// summary below can distinguish "nothing to save" from "save silently dropped it".
+				custom_areas_skipped++
 				continue
 			collect_persistent_payload(custom_anchor, PERSISTENT_PAYLOAD_CUSTOM_AREA, list(
 				"area_type" = "[custom_area.type]",
@@ -151,6 +159,7 @@
 				"default_gravity" = custom_area.default_gravity,
 				"turfs" = member_coords,
 			))
+			custom_areas_saved++
 		for(var/area/renamed_area as anything in GLOB.areas)
 			if(QDELETED(renamed_area) || GLOB.custom_areas[renamed_area])
 				continue
@@ -172,7 +181,11 @@
 				"area_type" = "[renamed_area.type]",
 				"name" = renamed_area.name,
 			))
+			renames_saved++
 			CHECK_TICK
+		// One line per level so a "my blueprint rooms vanished" report can be split at the seam:
+		// zero saved here means the SAVE side lost them, non-zero means look at the restore log.
+		log_world("PERSISTENT_MAP: z[z] area records - [custom_areas_saved] custom area\s saved ([length(GLOB.custom_areas)] registered globally, [custom_areas_skipped] with no turfs on this level), [renames_saved] area rename\s saved.")
 		var/list/level_payloads = payload_collector
 		payload_collector = null
 		if(!map_text)
