@@ -99,11 +99,37 @@
 	if(!blacklist)
 		blacklist = typecacheof(list(/obj/effect, /obj/projectile)) \
 			- typecacheof(list(/obj/effect/decal, /obj/effect/turf_decal, /obj/effect/landmark))
-		// Extension point: junk we never want to freeze into the station snapshot.
-		blacklist += typecacheof(list(/obj/effect/decal/cleanable/blood/gibs, /obj/effect/decal/remains))
-		// Cobwebs are deleted at init on persistent levels (persistent_decals.dm); blacklisting them
-		// too means one can never be baked into a snapshot even if it somehow outlives that pass.
-		blacklist += typecacheof(list(/obj/effect/decal/cleanable/cobweb))
+		// GRIME IS NOT PERSISTED (thirty-sixth pass). Live report: "walls are rusting and the station
+		// is getting dirtied. Blood, dirt, rust, etc."
+		//
+		// Cleaning is a per-round activity and a persistent station breaks its economy: every shift
+		// ADDS blood, dirt, vomit, ash, oil, glass and food smears, none of it is removed unless
+		// someone mops that exact tile, and the snapshot carries the whole backlog forward. After
+		// enough rounds the floor is a permanent slaughterhouse no janitor can dig out of. So the
+		// whole /obj/effect/decal/cleanable family is dropped from the snapshot: each shift starts
+		// physically clean, and cleaning WITHIN a round still works exactly as it always did.
+		//
+		// Two exceptions stay, because they are placed deliberately rather than accumulating:
+		//   - crayon: player-authored graffiti. persistent_decals.dm serializes its paint_colour and
+		//     rotation on purpose - that is somebody's art, not dirt.
+		//   - cargo_mark: a functional marker someone chose to put down.
+		//
+		// KNOWN CONSEQUENCE: this makes the forensic blood-DNA round-trip in persistent_decals.dm
+		// dormant. That is judged an acceptable loss - blood forensics only have gameplay value
+		// inside the round the crime happened, and cross-round DNA is noise on every tile. To get it
+		// back, add /obj/effect/decal/cleanable/blood to the keep list below; the serialization code
+		// is untouched and will simply start working again.
+		//
+		// Subsumes the old gibs and cobweb entries (both are cleanable subtypes). Cobwebs ALSO delete
+		// themselves at init on persistent levels - see persistent_decals.dm - which stays the primary
+		// mechanism for them; this is just belt and braces.
+		var/list/grime = typecacheof(list(/obj/effect/decal/cleanable)) - typecacheof(list(
+			/obj/effect/decal/cleanable/crayon,
+			/obj/effect/decal/cleanable/cargo_mark,
+		))
+		blacklist += grime
+		// /obj/effect/decal/remains is NOT a cleanable subtype, so it needs its own entry.
+		blacklist += typecacheof(list(/obj/effect/decal/remains))
 		// Modular map scaffolding (tramstation / biodome maintenance modules + cages). These are
 		// plain /obj, so the /obj/effect sweep above never caught them:
 		//  - modular_map_root normally deletes itself after stamping its room, but returns early

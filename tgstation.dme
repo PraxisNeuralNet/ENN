@@ -10947,7 +10947,9 @@
 #include "NETV\code\datums\station_traits\persistent_disabled_traits.dm"
 #include "NETV\code\game\objects\persistent_containers.dm"
 #include "NETV\code\game\objects\effects\decals\persistent_decals.dm"
+#include "NETV\code\game\turfs\persistent_rust.dm"
 #include "NETV\code\modules\admin\verbs\persistent_map.dm"
 #include "NETV\code\modules\persistent_map\mob_serialization.dm"
 #include "NETV\code\modules\persistent_map\new_player_reentry.dm"
+#include "NETV\code\modules\power\persistent_solars.dm"
 // END_INCLUDE

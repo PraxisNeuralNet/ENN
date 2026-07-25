@@ -1054,6 +1054,10 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// Techweb restore likewise waits for round start: SSpersistence has no dependency edge to
 	// SSresearch, so its techwebs are not guaranteed built yet (persistent_techweb.dm).
 	SSticker.OnRoundstart(CALLBACK(src, PROC_REF(restore_persistent_techweb)))
+	// Rust scrub runs HERE, not below the payload-file guard: rusted wall types are baked into the
+	// DMM itself, so they need clearing whether or not this level has a payload sidecar
+	// (persistent_rust.dm).
+	scrub_persistent_rust()
 	var/list/payload_files = SSmapping.persistent_loaded_payloads
 	if(!islist(payload_files) || !length(payload_files))
 		return

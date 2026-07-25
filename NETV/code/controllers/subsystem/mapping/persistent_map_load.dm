@@ -170,11 +170,14 @@
 // failure clears. Both halves are closed - blacklisted from the save (persistent_map_helpers.dm)
 // and refused here at init.
 //
-// Overrides core's load_map() (a /proc/ declaration, so this is a legal same-type override and
-// modular includes win); the core body is replicated below the guard, same pattern as the
-// persistent load_roundstart override in persistent_shuttles.dm. Initialize() is deliberately NOT
-// the hook - core already overrides it on this type, so a second override there would be a
-// duplicate definition.
+// Overrides core's load_map(); the core body is replicated below the guard, same pattern as the
+// load_roundstart override in persistent_shuttles.dm - a same-type override REPLACES the earlier
+// body and ..() goes to the parent type, so it cannot be called.
+//
+// load_map() is the hook rather than Initialize() because the guard belongs at the point of the
+// stamp, and because it lets the two early returns be fixed at the same time. (Overriding
+// Initialize() would also have been legal - NETV does exactly that for cleanable blood, which core
+// also defines - it would just have meant replicating more of the core body for no gain.)
 /obj/modular_map_root/load_map()
 	// Both flags matter: INITIALIZE_IMMEDIATE means a baked root fires DURING LoadGroup, before
 	// persistent_station_loaded is set, so the staging flag is the one that catches it mid-load.
