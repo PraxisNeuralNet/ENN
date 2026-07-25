@@ -399,20 +399,44 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		return
 	var/datum/material_container/holder = get_persistent_material_container()
 	if(!istype(holder))
+		log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] had a saved material store but no persistent material container; [length(mats)] material\s dropped.")
 		return
+	// CAPACITY MUST EXIST FIRST (thirty-ninth pass). insert_amount_mat() refuses outright when
+	// has_space() fails, and has_space() is `total + amt <= max_amount` - so with max_amount still 0
+	// every insert silently returns 0 and the whole store evaporates with no log line. An autolathe
+	// builds its container with max_amt = 0 and only gets real capacity from RefreshParts() reading
+	// its matter bins; that normally happens inside Initialize via circuit.apply_default_parts(), but
+	// if anything left it unrefreshed (a part list that failed to build, a machine that sets capacity
+	// later) the restore had no way to tell and no way to recover. Re-derive it here before inserting.
+	if(!holder.max_amount)
+		RefreshParts()
+		if(!holder.max_amount)
+			log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] has ZERO material capacity even after RefreshParts(); [length(mats)] material\s cannot be restored. Check its matter bins / component_parts.")
+			return
+	var/restored = 0
+	var/requested = 0
+	var/rejected = 0
 	for(var/mat_text in mats)
 		var/mat_path = text2path(mat_text)
 		var/amount = mats[mat_text]
 		if(!ispath(mat_path, /datum/material) || !isnum(amount) || amount <= 0)
+			rejected++
 			continue
+		requested += amount
 		amount = min(amount, PERSISTENT_MAX_SILO_MATERIAL)
-		if(holder.max_amount)
-			amount = min(amount, holder.max_amount - holder.total_amount())
+		// Re-read total_amount() each pass so earlier inserts count against the remaining space.
+		amount = min(amount, holder.max_amount - holder.total_amount())
 		if(amount <= 0)
 			continue
 		var/datum/material/mat = GET_MATERIAL_REF(mat_path)
-		if(mat)
-			holder.insert_amount_mat(amount, mat)
+		if(!mat)
+			rejected++
+			continue
+		restored += holder.insert_amount_mat(amount, mat)
+	// Logged unconditionally: a silent zero here is exactly the failure mode that made "the autolathe
+	// isn't saving its materials" impossible to diagnose. restored < requested means capacity ran out
+	// (bins downgraded since the save); restored == 0 with requested > 0 means the insert was refused.
+	log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] material store - restored [restored]/[requested] units across [length(mats)] material\s (capacity [holder.max_amount], now holding [holder.total_amount()])[rejected ? ", [rejected] unusable record\s" : ""].")
 
 /obj/machinery/get_save_vars()
 	. = ..()
@@ -432,6 +456,14 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		if(length(stored))
 			persistent_machine_materials = stored
 			. += NAMEOF(src, persistent_machine_materials)
+			// Save-side counterpart to the restore log (thirty-ninth pass). Gated on payload_collector
+			// so a vanilla admin map export stays quiet - the same "we are inside a persistent snapshot
+			// pass" signal collect_persistent_payload() uses. Between this line and the restore line,
+			// "the autolathe isn't saving its materials" splits cleanly: NO line here means the save
+			// side never saw the materials; a line here with no restore line means the var did not
+			// survive the DMM round-trip; both present with restored 0 means the insert was refused.
+			if(!isnull(SSpersistence.payload_collector))
+				log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] material store SAVED - [length(stored)] material\s, [mat_holder.total_amount()] units (capacity [mat_holder.max_amount]).")
 	persistent_stock_parts = null
 	if(!length(component_parts))
 		return .

@@ -12,6 +12,14 @@ SUBSYSTEM_DEF(pathfinder)
 	/// Assoc list of target turf -> list(/datum/path_map) centered on the turf
 	var/list/source_to_maps = list()
 	var/static/space_type_cache
+	//SPLURT EDIT ADDITION BEGIN - PATHFIND_LEAK - queue-depth diagnostic. A deep active_pathing queue
+	// is a symptom, not a cause: the useful question is always WHICH requesters are flooding it, and
+	// there was no way to see that short of VVing the list by hand. Rate-limited so a busy round
+	// cannot spam the log.
+	/// Log a requester breakdown once active_pathing reaches this depth.
+	var/pathfind_queue_warn_at = 40
+	COOLDOWN_DECLARE(pathfind_queue_warn_cooldown)
+	//SPLURT EDIT ADDITION END
 
 /datum/controller/subsystem/pathfinder/Initialize()
 	space_type_cache = typecacheof(/turf/open/space)
@@ -25,6 +33,7 @@ SUBSYSTEM_DEF(pathfinder)
 // We'll use a copy for this just to be nice to people reading the mc panel
 /datum/controller/subsystem/pathfinder/fire(resumed)
 	if(!resumed)
+		report_pathfind_queue_depth() //SPLURT EDIT ADDITION - PATHFIND_LEAK
 		src.currentrun = active_pathing.Copy()
 		src.currentmaps = deep_copy_list(source_to_maps)
 
@@ -59,6 +68,32 @@ SUBSYSTEM_DEF(pathfinder)
 
 		currentmaps.len--
 
+//SPLURT EDIT ADDITION BEGIN - PATHFIND_LEAK
+/// When the pathfinding queue gets deep, name the requesters responsible. A JPS search that will
+/// FAIL is the most expensive kind - it explores everything reachable inside max_distance before
+/// giving up - so a handful of mobs endlessly re-requesting an unreachable target (sealed room,
+/// cross-z target, a target that keeps moving out of range) can hold the whole queue down and drag
+/// the MC with it. This says who, by type, and how many of each.
+/datum/controller/subsystem/pathfinder/proc/report_pathfind_queue_depth()
+	var/depth = length(active_pathing)
+	if(depth < pathfind_queue_warn_at || !COOLDOWN_FINISHED(src, pathfind_queue_warn_cooldown))
+		return
+	COOLDOWN_START(src, pathfind_queue_warn_cooldown, 30 SECONDS)
+	var/list/by_type = list()
+	var/mapless = 0
+	for(var/datum/pathfind/queued as anything in active_pathing)
+		var/datum/pathfind/jps/as_jps = queued
+		if(!istype(as_jps) || QDELETED(as_jps.requester))
+			// sssp runs (path_map builds) and orphaned jps runs have no live requester to blame.
+			mapless++
+			continue
+		by_type["[as_jps.requester.type]"] += 1
+	var/list/lines = list()
+	for(var/requester_type in by_type)
+		lines += "[requester_type] x[by_type[requester_type]]"
+	log_world("PATHFINDER: queue depth [depth] (warn at [pathfind_queue_warn_at]). Requesters: [lines.Join(", ") || "none"][mapless ? " | [mapless] map-build/orphaned run\s" : ""].")
+//SPLURT EDIT ADDITION END
+
 /// Initiates a pathfind. Returns true if we're good, FALSE if something's failed
 /datum/controller/subsystem/pathfinder/proc/pathfind(atom/movable/requester, atom/end, max_distance = 30, mintargetdist, access = list(), simulated_only = TRUE, turf/exclude, skip_first = TRUE, diagonal_handling = DIAGONAL_REMOVE_CLUNKY, list/datum/callback/on_finish)
 	var/datum/pathfind/jps/path = new()
@@ -66,6 +101,13 @@ SUBSYSTEM_DEF(pathfinder)
 	if(path.start())
 		active_pathing += path
 		return TRUE
+	//SPLURT EDIT ADDITION BEGIN - PATHFIND_LEAK - a failed start() used to drop this datum on the
+	// floor: never qdel'd, and - worse - its on_finish callbacks never fired, so the requester was
+	// never told the attempt failed. qdel() handles both (Destroy() calls hand_back(null) and pulls
+	// us out of active_pathing/currentrun). start() fails routinely - cross-z targets, start == end,
+	// target farther than max_distance - so this is a hot path, not an edge case.
+	qdel(path)
+	//SPLURT EDIT ADDITION END
 	return FALSE
 
 /// Initiates a swarmed pathfind. Returns TRUE if we're good, FALSE if something's failed
@@ -138,6 +180,7 @@ SUBSYSTEM_DEF(pathfinder)
 	if(path.start())
 		active_pathing += path
 		return TRUE
+	qdel(path) //SPLURT EDIT ADDITION - PATHFIND_LEAK - see pathfind() above
 	return FALSE
 
 /// Initiates a SSSP run from a pass_info datum. Returns true if we're good, FALSE if something's failed
@@ -147,6 +190,7 @@ SUBSYSTEM_DEF(pathfinder)
 	if(path.start())
 		active_pathing += path
 		return TRUE
+	qdel(path) //SPLURT EDIT ADDITION - PATHFIND_LEAK - see pathfind() above
 	return FALSE
 
 /// Begins to handle a pathfinding run based off the input /datum/pathfind datum

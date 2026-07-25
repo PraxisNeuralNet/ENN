@@ -203,7 +203,9 @@
 // every round, so their webs cost nothing and are part of the intended atmosphere.
 //
 // NOTE: this is decorative cobwebs ONLY. Spider-spun /obj/structure/spider/stickyweb is a
-// structure, not a decal, and is deliberately left alone - persisted maintenance spiders respinning
+// structure, not a decal, and is deliberately left alone. NOTE: maintenance spiders are on the
+// persistent mob DENYLIST (24th pass, persistent_mobs.dm), so they do NOT survive a reload - any
+// webs you see are from spiders spawned fresh this round. Webs spun in-round persisting is wanted
 // their webs is wanted behaviour.
 /obj/effect/decal/cleanable/cobweb/Initialize(mapload)
 	. = ..()
