@@ -270,6 +270,13 @@
 		update_appearance(UPDATE_OVERLAYS)
 		return TRUE
 
+	//SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - put_in_hands() above already fired Exited(), which
+	// removed the disk from stacked_disks and (at zero) qdel'd src. On a ONE-disk stack the list is
+	// therefore empty by now and stacked_disks[1] threw an index-out-of-bounds runtime. The disk is
+	// already in the user's hands at that point, so there is nothing left to do.
+	if(!length(stacked_disks))
+		return TRUE
+	//SPLURT EDIT ADDITION END
 	var/obj/item/disk/last_disk = stacked_disks[1]
 	var/was_in_hand = user.is_holding(src)
 	if(was_in_hand)
@@ -288,7 +295,12 @@
 	var/amount_counter = 0
 	var/list/moved_disks = list()
 
-	for(var/obj/item/disk/each_disk as anything in diskstack.stacked_disks)
+	//SPLURT EDIT CHANGE BEGIN - PERSISTENT_MAP - iterate a COPY: forceMove() below fires the source
+	// stack's Exited(), which does `stacked_disks -= gone`, so iterating the live list shifted it
+	// under the loop and merged only every OTHER disk (the rest silently stranded in the old stack).
+	// ORIGINAL: for(var/obj/item/disk/each_disk as anything in diskstack.stacked_disks)
+	for(var/obj/item/disk/each_disk as anything in diskstack.stacked_disks.Copy())
+	//SPLURT EDIT CHANGE END
 		if(length(stacked_disks) >= MAX_DISK_STACK_SIZE)
 			break
 
@@ -320,7 +332,14 @@
 		return
 
 	var/turf/landing = get_turf(src)
-	for(var/obj/item/disk/each_disk as anything in stacked_disks)
+	//SPLURT EDIT CHANGE BEGIN - PERSISTENT_MAP - iterate a COPY. forceMove() fires Exited(), which
+	// does `stacked_disks -= gone`, so iterating the live list shifted it under the loop and only
+	// every OTHER disk was scattered. The skipped ones were still in stacked_disks when qdel(src)
+	// ran below, and Destroy()'s QDEL_LIST(stacked_disks) then DELETED them - throwing a stack of
+	// four disks permanently destroyed two of them. On a persistent station that loss is forever.
+	// ORIGINAL: for(var/obj/item/disk/each_disk as anything in stacked_disks)
+	for(var/obj/item/disk/each_disk as anything in stacked_disks.Copy())
+	//SPLURT EDIT CHANGE END
 		each_disk.forceMove(landing)
 		each_disk.throw_at(get_step(src, pick(NORTH, NORTHEAST, EAST, SOUTHEAST, SOUTH, SOUTHWEST, WEST, NORTHWEST)), 1, 0.8)
 

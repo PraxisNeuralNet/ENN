@@ -820,6 +820,74 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	update_appearance()
 
 // =================================================================================================
+// Floppy disk stacks (thirty-seventh pass)
+// =================================================================================================
+// Live report: "when you stack floppy disks, they get deleted."
+//
+// /obj/item/disk_stack keeps its disks in `stacked_disks`, a plain REFERENCE list, with the disks
+// forceMove'd into raw `contents`. It is not a storage-component container - `atom_storage` is null -
+// and both the serialize and restore walks are gated on `atom_storage` (mob_serialization.dm lines
+// 143 and 199). So nothing ever looked inside a stack: `write_map()` wrote the bare /obj/item/disk_stack
+// onto the turf and every disk in it was simply absent from the snapshot.
+//
+// It reads as deletion rather than as an empty stack because the type has `icon = null` and
+// `icon_state = null` - a stack with nothing in it draws nothing at all, since its whole appearance
+// comes from update_overlays() iterating `stacked_disks`. So a reloaded stack is an INVISIBLE object
+// sitting where the crew left a pile of disks.
+//
+// Exactly the shape of the cargo-shelf (BUG #8) and ammo-box (32nd pass) bugs: a reference list that
+// isn't storage. Same fix as ammo boxes, and it covers all three carriers at once - floor stacks get
+// an item_record payload, and stacks in a bag or a locker ride the JSON/sidecar record.
+
+/obj/item/disk_stack/has_persistent_item_state()
+	return TRUE
+
+/obj/item/disk_stack/serialize_persistent(depth = 1)
+	. = ..()
+	// ALWAYS present, so an emptied stack is authoritative rather than falling back to a default.
+	var/list/disk_records = list()
+	if(depth < PERSISTENT_MAX_RECURSION_DEPTH)
+		for(var/obj/item/disk/disk_in_stack as anything in stacked_disks)
+			var/list/record = disk_in_stack.serialize_persistent(depth + 1)
+			if(record)
+				disk_records += list(record)
+	.["stacked_disks"] = disk_records
+
+/obj/item/disk_stack/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	var/list/disk_records = data["stacked_disks"]
+	if(!islist(disk_records))
+		return // legacy record - leave whatever the stack came up with
+	// Saved contents are authoritative; SAFETY VALVE as everywhere - never wipe on a garbage list.
+	if(!persistent_records_restorable(disk_records))
+		log_world("PERSISTENT_MAP: untrustworthy disk-stack record for [src]; keeping current contents.")
+		return
+	// NO existing-contents wipe here, deliberately - unlike an ammo box (which spawns with a
+	// type-default load that has to be cleared), a disk stack has no default contents: it only ever
+	// exists because a player built one, and Initialize() leaves stacked_disks empty. Wiping would
+	// also be actively unsafe: Exited() qdels the whole stack the instant stacked_disks empties, so
+	// removing the last stale disk would delete the object we are restoring into. If a stack somehow
+	// already holds disks, keep them and skip rather than risk doubling or self-deletion.
+	if(length(stacked_disks))
+		log_world("PERSISTENT_MAP: disk stack [src] already holds [length(stacked_disks)] disk\s at restore time; leaving it alone.")
+		return
+	// MAX_DISK_STACK_SIZE is #undef'd at the end of floppy_disk.dm, so the cap is repeated here.
+	// Keep it in step with that define if upstream changes it.
+	var/max_disks = 10
+	for(var/list/record as anything in disk_records)
+		if(!islist(record) || length(stacked_disks) >= max_disks)
+			continue
+		var/disk_path = text2path(record["type"])
+		if(!ispath(disk_path, /obj/item/disk) || !is_persistent_type_allowed(disk_path))
+			continue
+		var/obj/item/disk/restored = new disk_path(src)
+		restored.deserialize_persistent(record, depth + 1)
+		stacked_disks += restored
+	// The stack's entire appearance is overlays built from stacked_disks, so without this it stays
+	// invisible even with the disks back inside it.
+	update_appearance(UPDATE_OVERLAYS)
+
+// =================================================================================================
 // Radios / headsets (encryption keys)
 // =================================================================================================
 // Encryption keys are REFERENCE vars (keyslot, headsets add keyslot2), not storage contents, so

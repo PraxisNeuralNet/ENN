@@ -108,6 +108,7 @@ code/modules/atmospherics/machinery/air_alarm/_air_alarm.dm   air alarm lock sta
 modular_skyrat/modules/automapper/code/area_spawn_subsystem.dm   area_spawn guard
 modular_skyrat/modules/cargo/code/export_gate.dm                 export gate guard
 modular_zubbers/code/game/objects/structures/engine_choice.dm     SM beacon guard
+code/game/objects/items/floppy_disk.dm         iterate-a-copy + bounds fixes (37th pass; upstream bugs, not hooks)
 ```
 
 **When something mysteriously doesn't persist, check whether its hook is one of these.** A NETV file can be perfect and still do nothing if the core hook that calls it was lost to an upstream merge.
@@ -246,15 +247,17 @@ Hard-won. Each cost a debugging round.
 
 **4. Same-type proc overrides can't call what they replaced.** See §3. Legal, but you must replicate the core body, and that copy rots silently against upstream.
 
-**5. Restoring a var ≠ restoring what it drives.** Saved vars land before `Initialize()`, so anything `Initialize()` derives from a hardcoded value will still be wrong. Check for a refresh call (`update_appearance()`, `RefreshParts()`, `update_icon_state()`) after restoring anything that feeds a sprite, a power figure, or a component list. Solar panels, spent medipens, and hand-built lights were all this bug.
+**5. A reference list is not storage, and the contents walk only follows `atom_storage`.** `serialize_persistent()` walks `contents` only when the item has a storage component. Anything that holds items in a plain ref var or list — ammo boxes (`stored_ammo`), cargo shelves (`shelf_contents`), disk stacks (`stacked_disks`), radio keyslots — is invisible to it, and its contents vanish from the snapshot. The fix is always the same: `has_persistent_item_state()` → TRUE, then carry the list as nested records in serialize/deserialize. **When you meet a new container, check whether it actually has `atom_storage` before assuming it round-trips.**
 
-**6. Baked shuttle ports are inert.** `register()` is only called by `action_load` and per-variant `LateInitialize`, so a snapshotted mobile port loads as scenery with a dead console. All mobile ports are blacklisted; shuttles template-respawn every round. The exempt-area mechanism (aux base, escape pods) keeps the *room* but accepts a dead port.
+**6. Restoring a var ≠ restoring what it drives.** Saved vars land before `Initialize()`, so anything `Initialize()` derives from a hardcoded value will still be wrong. Check for a refresh call (`update_appearance()`, `RefreshParts()`, `update_icon_state()`) after restoring anything that feeds a sprite, a power figure, or a component list. Solar panels, spent medipens, and hand-built lights were all this bug.
 
-**7. Roundstart injection accumulates.** Any system that spawns atoms at roundstart bakes into the snapshot and re-fires next boot. Guarded so far: `SSminor_mapping`, `SSarea_spawn`, SSjob scaling lockers, export gate, engine choice, modular map roots, and four station traits. **When adding content, ask: does this spawn things at roundstart? If yes, it needs a guard.** The predicate is `is_persistent_snapshot_area()`.
+**7. Baked shuttle ports are inert.** `register()` is only called by `action_load` and per-variant `LateInitialize`, so a snapshotted mobile port loads as scenery with a dead console. All mobile ports are blacklisted; shuttles template-respawn every round. The exempt-area mechanism (aux base, escape pods) keeps the *room* but accepts a dead port.
 
-**8. Death is not derivable from damage.** `update_stat()` only kills below `HEALTH_THRESHOLD_DEAD`, but people die at any health from asphyxiation, brain death, organ failure, suicide, defib timeout. Serialize `stat`, don't infer it.
+**8. Roundstart injection accumulates.** Any system that spawns atoms at roundstart bakes into the snapshot and re-fires next boot. Guarded so far: `SSminor_mapping`, `SSarea_spawn`, SSjob scaling lockers, export gate, engine choice, modular map roots, and four station traits. **When adding content, ask: does this spawn things at roundstart? If yes, it needs a guard.** The predicate is `is_persistent_snapshot_area()`.
 
-**9. A broken `.dme` include fails the whole compile.** If a "fixed" bug appears unfixed, **confirm the build actually compiled.** One include line in this project was byte-corrupted (`\cO` → `0x0F`) and silently invalidated every subsequent fix.
+**9. Death is not derivable from damage.** `update_stat()` only kills below `HEALTH_THRESHOLD_DEAD`, but people die at any health from asphyxiation, brain death, organ failure, suicide, defib timeout. Serialize `stat`, don't infer it.
+
+**10. A broken `.dme` include fails the whole compile.** If a "fixed" bug appears unfixed, **confirm the build actually compiled.** One include line in this project was byte-corrupted (`\cO` → `0x0F`) and silently invalidated every subsequent fix.
 
 ---
 
@@ -322,7 +325,7 @@ Read `PERSISTENT_MAP_BUGS.md` §0. Bugs #1, #2, #3 and #8 were **one root cause*
 	. += NAMEOF(src, my_flag)
 	return .
 ```
-Only vars differing from `initial()` are written, so mapped objects stay clean. Must be flat. **Then ask trap 5: does anything need refreshing after the var lands?**
+Only vars differing from `initial()` are written, so mapped objects stay clean. Must be flat. **Then ask trap 6: does anything need refreshing after the var lands?**
 
 **Nested state** — sidecar:
 1. `#define PERSISTENT_PAYLOAD_MYKIND "mykind"` in `NETV/code/__DEFINES/persistent_map.dm`.
@@ -338,10 +341,11 @@ Only vars differing from `initial()` are written, so mapped objects stay clean. 
 2. Is the map **pinned**, and did the snapshot **load**? (`PERSISTENT_MAP:` discard lines.)
 3. Is the value in the **artifact**? Open `data/persistent_map/z<N>.dmm` and grep for the type — present means load-side, absent means save-side. Same for `payloads_z<N>.json` and `persistent_mobs.json` (they're plain JSON).
 4. Is the value **flat**? Nested lists in a DMM var are trap 1.
-5. If the value is right but the *behaviour* is wrong — trap 5. Something needs a refresh call.
+   And if it's a *container*: does it actually have `atom_storage`? If not, trap 5 — the contents walk never saw it.
+5. If the value is right but the *behaviour* is wrong — trap 6. Something needs a refresh call.
 6. Is a **safety valve** refusing a wipe because the record list looked untrustworthy?
 7. Is the **core hook** still there? Grep `PERSISTENT_MAP` in the relevant core file.
-8. Is something **re-injecting** it at roundstart? (trap 7)
+8. Is something **re-injecting** it at roundstart? (trap 8)
 
 ### If you rewrite
 
