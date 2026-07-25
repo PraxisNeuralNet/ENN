@@ -464,7 +464,7 @@ Used by the AI doomsday and the self-destruct nuke.
 	// Role passed as a LITERAL, not as PERSISTENT_ROLE_STATION: NETV's defines are included at the very
 	// end of the .dme (the whole module ships as one block), which is AFTER this file, so the define is
 	// not visible here. Keeping this literal is what lets NETV stay a self-contained block with no
-	// include-order claim on core - see NETV/NETV_GUIDE.md, "The .dme contract".
+	// include-order claim on core - see NETV_GUIDE.md, "The .dme contract".
 	if(!(persistent_snapshot && load_persistent_group(FailedZs, persistent_snapshot, "station", "Station", ZTRAITS_STATION, current_map.height_autosetup)))
 		//SPLURT EDIT ADDITION END
 		LoadGroup(FailedZs, "Station", current_map.map_path, current_map.map_file, current_map.traits, ZTRAITS_STATION, height_autosetup = current_map.height_autosetup)

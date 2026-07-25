@@ -70,6 +70,12 @@
 /// Tighter, semantically-sane cap for a single restored bloodstream reagent volume. Real bloodstream
 /// reagents sit well under this; the lower bound stops a tampered file minting a god-volume chem.
 #define PERSISTENT_MAX_REAGENT_VOLUME 1000
+/// Clamp band for a restored reagent-holder temperature, in Kelvin. Temperature has to round-trip or
+/// a saved-stable mixture comes back at DEFAULT_REAGENT_TEMPERATURE, where a heat-gated reaction can
+/// suddenly be live (thirty-eighth pass) - but it comes off a trust-boundary file, so it is clamped
+/// to a physically sane band rather than fed to the holder raw.
+#define PERSISTENT_MIN_REAGENT_TEMP 0
+#define PERSISTENT_MAX_REAGENT_TEMP 10000
 /// Cap for a single restored ore-silo material amount (units; 100 units = 1 sheet, so this is 10k
 /// sheets per material). Stops a tampered snapshot minting infinite materials.
 #define PERSISTENT_MAX_SILO_MATERIAL 1000000

@@ -132,6 +132,10 @@
 		for(var/datum/reagent/reagent as anything in reagents.reagent_list)
 			chems += list(list("type" = "[reagent.type]", "volume" = reagent.volume))
 		.["reagents"] = chems // always present when a reagents holder exists, so EMPTY stays empty
+		// Temperature has to ride along (thirty-eighth pass): a mixture that was stable only because
+		// it was cold comes back at DEFAULT_REAGENT_TEMPERATURE otherwise, which can make a
+		// heat-gated reaction live. See the deserialize side for the full story.
+		.["reagent_temp"] = reagents.chem_temp
 	// Hand-edited (VV) vars (twentieth pass): items inside containers/inventories don't ride the
 	// DMM, so their recorded edits travel on the JSON record instead.
 	var/list/edited = serialize_persistent_edited_vars(src)
@@ -169,12 +173,33 @@
 			update_appearance(UPDATE_ICON)
 	if(islist(data["reagents"]) && reagents)
 		reagents.clear_reagents() // saved contents are authoritative - a used medipen stays used
+		// NO_REACT + SAVED TEMPERATURE (thirty-eighth pass - "smuggler's satchels are exploding
+		// themselves and making holes in the floor").
+		//
+		// add_reagent() defaults to no_react = FALSE, so it ran handle_reactions() after EVERY
+		// addition. Restoring a mixture one reagent at a time therefore walked it through a series
+		// of INTERMEDIATE mixtures that never existed in-game, and a partial mix can react where the
+		// complete one does not. It also defaults reagtemp to DEFAULT_REAGENT_TEMPERATURE, so a
+		// mixture that was stable only because of its temperature came back hot/cold enough to fire
+		// a heat-gated recipe. tg's pyrotechnics recipes include reagent_explosion reactions, which
+		// call explosion() - and a smuggler's satchel is the perfect victim: it is stuffed with
+		// contraband reagent containers (thermite, blastoff ampoules, pill bottles) by
+		// PopulateContents(), and it sits UNDER a floor tile, so the crater appeared exactly where
+		// the satchel was hidden.
+		//
+		// The saved state was stable by definition - it existed at round end without reacting - so
+		// the correct restoration is to rebuild it and NOT re-run reaction checking at all. Every
+		// addition is no_react, carries the saved temperature so the holder equalises to the right
+		// value as it fills, and there is deliberately no handle_reactions() afterwards.
+		var/saved_temp = isnum(data["reagent_temp"]) \
+			? clamp(data["reagent_temp"], PERSISTENT_MIN_REAGENT_TEMP, PERSISTENT_MAX_REAGENT_TEMP) \
+			: reagents.chem_temp
 		for(var/list/chem as anything in data["reagents"])
 			if(!islist(chem))
 				continue
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
-				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME), reagtemp = saved_temp, no_react = TRUE)
 		// Fill-state sprites derive from reagents but Initialize rendered BEFORE this record
 		// applied - without a redraw an emptied medipen/beaker wears its factory-new sprite
 		// (thirty-second pass, "used medipens refreshing").
@@ -325,6 +350,7 @@
 			chems += list(list("type" = "[reagent.type]", "volume" = reagent.volume))
 		if(length(chems))
 			.["reagents"] = chems
+			.["reagent_temp"] = reagents.chem_temp // see the item path - stable mixes must stay stable
 	// Quirks (character traits + admin-given ones) - saved by TYPE, re-added through the allowlist.
 	var/list/quirk_types = list()
 	for(var/datum/quirk/quirk as anything in quirks)
@@ -385,10 +411,17 @@
 	. = ..()
 	var/list/chems = data["reagents"]
 	if(islist(chems) && reagents)
+		// no_react + saved temperature, exactly as on the item path above: a bloodstream mixture that
+		// was stable at round end must not be walked through reacting intermediate states on restore.
+		var/saved_temp = isnum(data["reagent_temp"]) \
+			? clamp(data["reagent_temp"], PERSISTENT_MIN_REAGENT_TEMP, PERSISTENT_MAX_REAGENT_TEMP) \
+			: reagents.chem_temp
 		for(var/list/chem as anything in chems)
+			if(!islist(chem))
+				continue
 			var/chem_path = text2path(chem["type"])
 			if(ispath(chem_path, /datum/reagent))
-				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME))
+				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME), reagtemp = saved_temp, no_react = TRUE)
 	// Character voice - bloopers resolve through the SSblooper singleton registry (nothing is ever
 	// instantiated from the file); the TTS voice is validated against the configured speaker list,
 	// mirroring the failsafe the preference itself uses.
