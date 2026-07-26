@@ -187,6 +187,97 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	update_appearance()
 
 // =================================================================================================
+// Bookcases + books (forty-second pass)
+// =================================================================================================
+// Live report: "bookshelves aren't saving the books stored on them."
+//
+// Two halves, both instances of the reference-list-is-not-storage trap (NETV_GUIDE.md trap 5):
+//
+//  1. THE SHELF. /obj/structure/bookcase holds its books in RAW `contents` - Initialize() does
+//     `for(var/obj/item/I in loc) ... I.forceMove(src)` - and it has no atom_storage at all. The
+//     generic contents walk only follows atom_storage, so nothing ever looked inside a bookcase and
+//     the books were simply absent from the snapshot.
+//
+//  2. THE BOOK. Even once the shelf carries its contents, `/obj/item/book/Initialize()` does
+//     `book_data = new(starting_title, starting_author, starting_content)` - it rebuilds the book's
+//     text from TYPE defaults every time. A book a player actually wrote would come back blank, so
+//     restoring the shelf alone would have produced a row of empty props.
+//
+// The shelf uses the existing generic PERSISTENT_PAYLOAD_CONTENTS kind (the payload walk routes it
+// to apply_persistent_contents() on whatever object it matches), so it needs no new payload type.
+
+/obj/structure/bookcase/get_save_vars()
+	. = ..()
+	// persistent_storage_location() falls through to the bookcase itself when there is no storage
+	// datum, so this captures raw contents - exactly the books.
+	SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_CONTENTS, serialize_persistent_container_items(src))
+	return .
+
+/// Bookcases need a wipe before restoring, which the generic /obj version deliberately does not do
+/// (closets latch their population with contents_initialized, so they have nothing to clear).
+/// A bookcase has no such latch: `load_random_books` shelves generate a fresh random selection
+/// through load_shelf() on EVERY boot, so without this the saved books would stack on top of a new
+/// random set every round.
+/obj/structure/bookcase/apply_persistent_contents(list/records)
+	if(!islist(records))
+		return
+	// SAFETY VALVE (BUGS #2/#3) - never wipe on a record list that cannot restore anything.
+	if(!persistent_records_restorable(records))
+		log_world("PERSISTENT_MAP: untrustworthy contents record for [src] at [AREACOORD(src)]; keeping existing books.")
+		return
+	// Kill the random generator BEFORE anything else. load_shelf() is INVOKE_ASYNC'd from Initialize
+	// (or deferred into SSlibrary.shelves_to_load when SSlibrary has not initialized yet), so we
+	// cannot rely on it having already run by the time the payload walk reaches us. Clearing the
+	// flag makes the outcome correct in BOTH orderings: if it already ran, the wipe below removes
+	// its books; if it runs later, it now generates nothing on top of ours.
+	load_random_books = FALSE
+	for(var/obj/item/stale in contents.Copy())
+		qdel(stale)
+	// The base handler restores the records and calls update_appearance(), which the bookcase sprite
+	// needs anyway - its icon state is keyed to how many books it holds.
+	return ..()
+
+/// Books carry player-authored text, which is the entire point of persisting them.
+/obj/item/book/has_persistent_item_state()
+	return TRUE
+
+/obj/item/book/serialize_persistent(depth = 1)
+	. = ..()
+	if(book_data)
+		// Stored raw; the setters re-sanitize on the way back in (see deserialize).
+		.["book"] = list(
+			"title" = book_data.title,
+			"author" = book_data.author,
+			"content" = book_data.content,
+		)
+	if(carved)
+		.["carved"] = TRUE
+	if(due_date)
+		.["due_date"] = due_date
+
+/obj/item/book/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	// Carve FIRST: carve_out() is what creates the storage datum, and restore_persistent_item()
+	// checks item.atom_storage AFTER this proc returns to decide whether to rebuild contents. A
+	// hollowed book that restored uncarved would silently drop whatever was hidden inside it.
+	if(data["carved"] && !carved)
+		carve_out()
+	if(isnum(data["due_date"]))
+		due_date = data["due_date"]
+	var/list/book_record = data["book"]
+	if(!islist(book_record) || !book_data)
+		return
+	// trusted = FALSE on purpose: these values come off a trust-boundary file, and the untrusted
+	// path is exactly the sanitization we want - html_encode plus a length trim (30 for the title,
+	// MAX_NAME_LEN for the author, MAX_PAPER_LENGTH for the content). No bespoke sanitizer needed.
+	if(!isnull(book_record["title"]))
+		book_data.set_title(book_record["title"])
+	if(!isnull(book_record["author"]))
+		book_data.set_author(book_record["author"])
+	if(!isnull(book_record["content"]))
+		book_data.set_content(book_record["content"])
+
+// =================================================================================================
 // Light fixtures
 // =================================================================================================
 
