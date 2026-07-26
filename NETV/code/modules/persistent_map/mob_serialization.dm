@@ -93,8 +93,11 @@
 	var/list/contents_data = data["contents"]
 	if(!islist(contents_data))
 		return
+	// One budget for the WHOLE inventory, not one per worn item - otherwise a mob with fifty slots
+	// could mint fifty times the cap (forty-first pass).
+	var/list/budget = list("left" = PERSISTENT_MAX_RESTORE_ITEMS)
 	for(var/list/item_data as anything in contents_data)
-		restore_persistent_item(item_data, src, 1)
+		restore_persistent_item(item_data, src, 1, budget)
 
 // =================================================================================================
 // Items (recursive, depth-first)
@@ -233,8 +236,10 @@
 		var/atom/storage_loc = persistent_storage_location(src)
 		for(var/obj/item/stale in storage_loc.contents.Copy())
 			qdel(stale)
+		var/list/budget = list("left" = PERSISTENT_MAX_RESTORE_ITEMS) // one budget for the whole tree
 		for(var/list/child as anything in child_contents)
-			restore_persistent_item(child, src, 2)
+			restore_persistent_item(child, src, 2, budget)
+		update_appearance() // contents changed without going through the storage datum
 
 // =================================================================================================
 // Shared inventory walk / rebuild
@@ -262,18 +267,100 @@
 		if(record)
 			. += list(record)
 
-/// Create one item from a record, place it on/into destination, and recurse into its contents.
+// =================================================================================================
+// THE NESTED-CONTAINMENT INVARIANT (forty-first pass)
+// =================================================================================================
+// Live report: "contents inside of boxes are spilling out everywhere - a box inside a box, and
+// everything in the smaller box ends up on the floor."
+//
+// Root cause, confirmed. The old restore did this for every item:
+//
+//     var/atom/spawn_loc = get_turf(destination) || destination
+//     var/obj/item/item = new item_path(spawn_loc)      // born ON THE FLOOR
+//     ...
+//     destination.atom_storage.attempt_insert(item, override = TRUE, messages = FALSE)
+//
+// Two compounding faults:
+//
+//  1. EVERY restored item was born on the TURF and then moved in. `override` does NOT bypass
+//     validation - it only suppresses the feedback message - so the move went through
+//     /datum/storage/can_insert(), the full PLAYER-FACING rule set. Anything it refused was simply
+//     left where it was born: on the floor. Silently. No log, no fallback.
+//
+//  2. can_insert() has rules that fire specifically on NESTED containers, and the old ordering
+//     walked straight into them. The worst is the "bigger fish" rule:
+//
+//         var/datum/storage/bigger_fish = parent.loc.atom_storage
+//         if(bigger_fish && bigger_fish.max_specific_storage < max_specific_storage)
+//             return FALSE
+//
+//     The inner box was inserted into the outer box FIRST, and only then filled. By that point
+//     `parent.loc` is the outer box, so every single insert into the inner box was judged against
+//     the OUTER container's mouth size - and refused whenever the outer one is narrower. Result:
+//     the inner box arrives empty and its entire contents are lying on the floor. Exactly the
+//     report. `max_slots`, `max_total_storage` and the equal-w_class nesting rule can each do the
+//     same thing on their own.
+//
+// THE INVARIANT, and why it is the right shape:
+//
+//     A restored item is BORN IN ITS FINAL HOME AND NEVER MOVES.
+//
+// Restoration is not a player action. The arrangement being rebuilt already existed and was already
+// legal (or was made by an admin, which is equally legitimate); re-litigating it against the rules
+// that govern a human stuffing a duffel is a category error, and it is what produced the spill. So
+// the pipeline no longer asks permission: it computes the item's true home up front - the storage
+// datum's real_location for containers, the mob for mobs, the atom itself otherwise - and creates
+// the item directly there.
+//
+// This kills the whole failure class at once, not just the reported symptom:
+//   * Nothing is ever created on a turf, so nothing can be left on one.
+//   * No player-facing capacity/nesting check can reject a legitimate saved arrangement.
+//   * Fill-order stops mattering. There is no window in which a half-built container is judged
+//     against its eventual parent, because nothing is ever inserted into anything.
+//   * No transient turf presence means no spurious Entered/Crossed signals - a restored item can no
+//     longer trip a pressure plate, land on a conveyor, or be seen flickering into existence.
+//
+// What we give up by not calling attempt_insert(): the STORED_ITEM signals, the pickup animation,
+// and insertion feedback. All three describe "a user just put this here", which is false during a
+// boot-time rebuild. parent.update_appearance() is called explicitly so sprites still refresh.
+//
+// SECURITY. can_insert() was incidentally acting as the bound on how much a file could conjure.
+// Depth alone does not bound it (depth 8 x unbounded width), so PERSISTENT_MAX_RESTORE_ITEMS is now
+// the explicit budget, threaded through the whole recursion by reference so it bounds the ENTIRE
+// tree rather than any one level. Type allowlisting, name sanitising and stack clamping are
+// unchanged.
+
+/// Where a child of `destination` must physically be created. Containers resolve to their storage
+/// datum's real_location (never raw contents - a MOD control's raw contents are its PARTS, BUG #1);
+/// everything else is its own home.
+/proc/persistent_item_cradle(atom/destination)
+	if(ismob(destination))
+		return destination
+	return persistent_storage_location(destination)
+
+/// Create one item from a record directly inside destination, and recurse into its contents.
 /// Returns the created item or null. ALL type instantiation goes through the allowlist (design
 /// sec 8.5 #1)  -  never `new` a path straight from the file.
-/proc/restore_persistent_item(list/item_data, atom/destination, depth)
-	if(depth > PERSISTENT_MAX_RECURSION_DEPTH || !islist(item_data))
+/// `budget` is an in/out list("left" = N) shared by the whole tree; callers may omit it.
+/proc/restore_persistent_item(list/item_data, atom/destination, depth, list/budget)
+	if(depth > PERSISTENT_MAX_RECURSION_DEPTH || !islist(item_data) || isnull(destination))
+		return null
+	// Root call opens the budget; every nested call inherits the same list by reference.
+	if(isnull(budget))
+		budget = list("left" = PERSISTENT_MAX_RESTORE_ITEMS)
+	if(budget["left"] <= 0)
+		if(budget["left"] == 0) // log once, on the transition
+			budget["left"] = -1
+			log_world("PERSISTENT_MAP: restore item budget ([PERSISTENT_MAX_RESTORE_ITEMS]) exhausted while rebuilding into [destination]; the rest of this tree is discarded.")
 		return null
 	var/item_path = text2path(item_data["type"])
 	if(!ispath(item_path, /obj/item) || !is_persistent_type_allowed(item_path))
 		return null
+	budget["left"] -= 1
 
-	var/atom/spawn_loc = get_turf(destination) || destination
-	var/obj/item/item = new item_path(spawn_loc)
+	// BORN IN PLACE. No turf, no move, nothing to spill.
+	var/atom/cradle = persistent_item_cradle(destination)
+	var/obj/item/item = new item_path(cradle)
 
 	var/clean_name = sanitize_persistent_text(item_data["name"], PERSISTENT_MAX_NAME_LEN)
 	if(clean_name)
@@ -284,15 +371,18 @@
 
 	item.deserialize_persistent(item_data, depth)
 
-	// Place the item: onto a mob via the normal equip path; into a container's storage; else drop.
+	// Mobs are the one destination where placement is SEMANTIC rather than spatial - an item has to
+	// land in the right equipment slot, not merely inside the mob. Born in the mob's contents above,
+	// so a failed equip leaves it held rather than dropped; only a total failure reaches the floor,
+	// and that is now reported instead of silent.
 	if(ismob(destination))
 		var/mob/mob_dest = destination
 		if(!mob_dest.equip_to_appropriate_slot(item) && !mob_dest.put_in_hands(item))
-			item.forceMove(get_turf(mob_dest) || mob_dest)
-	else if(destination.atom_storage)
-		destination.atom_storage.attempt_insert(item, override = TRUE, messages = FALSE)
-	else
-		item.forceMove(destination)
+			var/turf/drop_turf = get_turf(mob_dest)
+			item.forceMove(drop_turf || mob_dest)
+			// No AREACOORD here: this is an error path and the mob may be in nullspace, which is
+			// exactly where that macro runtimes. Coordinates only when we actually have a turf.
+			log_world("PERSISTENT_MAP: could not equip or hand restored [item.type] to [mob_dest]; left [drop_turf ? "on the floor at [AREACOORD(drop_turf)]" : "inside the mob (nullspace)"].")
 
 	var/list/child_contents = item_data["contents"]
 	if(islist(child_contents) && item.atom_storage)
@@ -305,7 +395,10 @@
 			for(var/obj/item/stale in storage_loc.contents.Copy())
 				qdel(stale)
 			for(var/list/child as anything in child_contents)
-				restore_persistent_item(child, item, depth + 1)
+				restore_persistent_item(child, item, depth + 1, budget)
+			// Contents changed without going through the storage datum, so refresh what the datum
+			// would normally have refreshed for us.
+			item.update_appearance()
 		else
 			log_world("PERSISTENT_MAP: untrustworthy contents record for restored [item]; keeping default contents.")
 	return item

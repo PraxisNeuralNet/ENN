@@ -65,6 +65,13 @@
 #define PERSISTENT_MAX_EDITED_TEXT_LEN 512
 #define PERSISTENT_MAX_LAW_LEN 256
 #define PERSISTENT_MAX_RECURSION_DEPTH 8
+/// Hard ceiling on the TOTAL number of items one restore tree may create (forty-first pass). Depth
+/// alone is not a bound: at depth 8 a tampered file could describe a container holding a thousand
+/// containers each holding a thousand more. The item pipeline no longer runs player-facing storage
+/// capacity checks (they were rejecting legitimate nested restores - see the nested-containment
+/// invariant in mob_serialization.dm), so this budget is what replaces them as the DoS bound. Set
+/// far above any real inventory: a fully kitted player carries well under a hundred items.
+#define PERSISTENT_MAX_RESTORE_ITEMS 1000
 /// Upper bound applied to restored damage / charge values.
 #define PERSISTENT_DAMAGE_CAP 100000
 /// Tighter, semantically-sane cap for a single restored bloodstream reagent volume. Real bloodstream

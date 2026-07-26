@@ -180,8 +180,11 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 /obj/proc/apply_persistent_contents(list/records)
 	if(!islist(records))
 		return
+	// One budget for the whole closet, not one per top-level item (forty-first pass).
+	var/list/budget = list("left" = PERSISTENT_MAX_RESTORE_ITEMS)
 	for(var/list/item_data as anything in records)
-		restore_persistent_item(item_data, src, 1)
+		restore_persistent_item(item_data, src, 1, budget)
+	update_appearance()
 
 // =================================================================================================
 // Light fixtures
