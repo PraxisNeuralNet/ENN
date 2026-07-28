@@ -912,7 +912,17 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// ALWAYS present, so an emptied magazine is authoritative and stays empty.
 	var/list/ammo_records = list()
 	if(depth < PERSISTENT_MAX_RECURSION_DEPTH)
-		for(var/obj/item/ammo_casing/casing as anything in stored_ammo)
+		// stored_ammo is NOT a list of casings. Rounds lazy-load: entries stay as bare TYPEPATHS until
+		// something actually draws one (see /obj/item/ammo_box/proc/ammo_list in _box_magazine.dm), and
+		// revolver cylinders keep nulls for empty chambers. Calling serialize_persistent() on a typepath
+		// runtimes, and that runtime does NOT stop at this box - it unwinds the whole enclosing
+		// get_save_vars() chain, so the closet/crate holding the gun case saved NO vars at all (contents
+		// payload, contents_initialized latch, welded/locked state: all lost). A stock MetaStation threw
+		// 38 of these in a single snapshot pass. ammo_list() is core's own "force the lazy rounds to
+		// exist" accessor; the istype guard then covers the cylinder nulls.
+		for(var/obj/item/ammo_casing/casing as anything in ammo_list())
+			if(!istype(casing))
+				continue
 			var/list/record = casing.serialize_persistent(depth + 1)
 			if(record)
 				ammo_records += list(record)

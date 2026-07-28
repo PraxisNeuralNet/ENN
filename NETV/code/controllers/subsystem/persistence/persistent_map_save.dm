@@ -39,12 +39,31 @@
 /// hard-freeze the world.)
 /datum/controller/subsystem/persistence/proc/save_persistent_snapshot()
 	if(map_saving)
-		return FALSE
+		// This used to `return FALSE` instantly and silently, and that is the whole failure. The pass is
+		// multi-tick (write_map() is CHECK_TICK-throttled; ~40-60s on a 255x255 station), and the caller
+		// treats "returned" as "the snapshot is committed, we can reboot now". Returning early hands the
+		// round back to roundend.dm, which sleeps 5s and calls standard_reboot() - and the world dies
+		// with the in-flight save part-way through write_map(), before the manifest (the commit marker)
+		// is ever written. Nothing is committed, the next boot reloads the PREVIOUS snapshot, and the
+		// entire round - every redefined turf, every built room - is silently gone. Reproduced.
+		// So: wait for the save that is already running instead of pretending we did one.
+		log_world("PERSISTENT_MAP: a snapshot save is already in flight; waiting for it to commit rather than returning (the caller may be about to reboot).")
+		var/waited = 0
+		while(map_saving && waited < PERSISTENT_SAVE_WAIT_LIMIT)
+			sleep(1)
+			waited++
+		if(map_saving)
+			log_world("PERSISTENT_MAP: in-flight save did not finish within [PERSISTENT_SAVE_WAIT_LIMIT / 10] seconds; giving up on waiting. The snapshot may not be committed.")
+			return FALSE
+		log_world("PERSISTENT_MAP: in-flight save finished after [waited / 10] seconds; not re-saving.")
+		return TRUE
+	log_world("PERSISTENT_MAP: snapshot save starting (map '[SSmapping.current_map?.map_name]', maxz [world.maxz]).")
 	map_saving = TRUE
 	. = write_persistent_map_files()
 	if(.)
 		save_persistent_mobs()
 		save_persistent_techweb() // R&D layer rides the same commit gate (persistent_techweb.dm)
+		log_world("PERSISTENT_MAP: snapshot COMMITTED.")
 	else
 		log_world("PERSISTENT_MAP: map layer save failed; actor layer skipped so both layers stay in sync with the previous snapshot.")
 	map_saving = FALSE
@@ -64,8 +83,19 @@
 /// the pass spreads safely across many ticks and never freezes the server. NOTE: this is the
 /// guard-free worker - callers (above) own the map_saving guard.
 /datum/controller/subsystem/persistence/proc/write_persistent_map_files()
+	// A boot that REFUSED an existing snapshot (different map, different dimensions) must not be the
+	// boot that overwrites it. Without this the failure is silent and total: boot on the wrong map ->
+	// snapshot discarded -> shipped station loads -> round end faithfully saves the SHIPPED station
+	// over the crew's, and every turf they ever redefined is gone with no way back.
+	if(SSmapping.persistent_snapshot_rejected)
+		log_world("PERSISTENT_MAP: REFUSING TO SAVE - this boot rejected the snapshot on disk ([SSmapping.persistent_snapshot_rejected]) and loaded shipped maps instead. Saving now would overwrite a good snapshot with a fresh station.")
+		return FALSE
+
 	var/list/manifest = list(
 		"version" = PERSISTENT_MAP_VERSION,
+		// Identity, not just geometry - see load_persistent_manifest(). Same-size maps are common, so
+		// dimensions alone let a snapshot cross-load onto the wrong station.
+		"map" = SSmapping.current_map?.map_name,
 		"maxx" = world.maxx,
 		"maxy" = world.maxy,
 		"levels" = list(),
@@ -73,6 +103,12 @@
 	// Per-role 1-based counter so the manifest keys levels by {role, ordinal}, not absolute z.
 	var/list/ordinal_by_role = list()
 	var/list/obj_blacklist = persistent_obj_blacklist()
+
+	var/list/scoped = list()
+	for(var/z in 1 to world.maxz)
+		if(persistent_level_role(z))
+			scoped += z
+	log_world("PERSISTENT_MAP: write_persistent_map_files() entered - persistent levels: [scoped.len ? scoped.Join(", ") : "NONE"] (of [world.maxz]).")
 
 	for(var/z in 1 to world.maxz)
 		var/role = persistent_level_role(z)

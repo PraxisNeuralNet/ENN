@@ -16,6 +16,12 @@
 /// discarded by the bump.
 #define PERSISTENT_MAP_VERSION 2
 
+/// How long (in ds) a second caller will wait for an in-flight snapshot save to commit before giving
+/// up. The pass is CHECK_TICK-throttled and takes ~40-60s on a 255x255 station, so this is generous
+/// on purpose: the alternative to waiting is the caller rebooting the world mid-write and committing
+/// nothing at all (see save_persistent_snapshot).
+#define PERSISTENT_SAVE_WAIT_LIMIT (3 MINUTES)
+
 /// Logical role for a persisted level. Manifest records are keyed by role + ordinal rather than
 /// absolute z, so snapshots survive base-map/build z-shifts (design sec 12.2). Scope is Station
 /// ONLY - Lavaland and space ruins regenerate each round (design sec 10.1).

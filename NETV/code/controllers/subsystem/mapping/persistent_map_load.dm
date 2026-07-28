@@ -13,6 +13,12 @@
 	/// Mobile shuttle ids the snapshot expected per the manifest fleet inventory, consumed by the
 	/// round-start shuttle reconciliation pass (BUG #7).
 	var/list/persistent_expected_shuttles
+	/// Non-null when a snapshot EXISTED on disk this boot but was refused because it describes a
+	/// different station than the one we are booting (wrong map name, or wrong dimensions). Holds the
+	/// reason, and is the gate that stops the round-end save from overwriting that snapshot - see
+	/// write_persistent_map_files(). A rejected snapshot is somebody's station; a boot that merely
+	/// could not use it must never be the boot that destroys it.
+	var/persistent_snapshot_rejected
 	/// TRUE only WHILE LoadGroup is stamping the snapshot into the world. persistent_station_loaded
 	/// is deliberately set after LoadGroup returns (it means "the load succeeded"), which is too
 	/// late for anything that runs DURING mapload - INITIALIZE_IMMEDIATE atoms in particular. Guards
@@ -33,9 +39,23 @@
 	if(raw["version"] != PERSISTENT_MAP_VERSION)
 		log_world("PERSISTENT_MAP: manifest version [json_encode(raw["version"])] != [PERSISTENT_MAP_VERSION]; discarding snapshot.")
 		return null
-	// Snapshots are size-locked to the dimensions they were taken at (design sec 5.2).
+	// Snapshots are MAP-locked as well as size-locked. Size alone is not an identity: most station maps
+	// in rotation share 255x255, so a snapshot taken on one of them passed every check and got stamped
+	// onto a different station - and the round-end save then wrote that hybrid back over the original.
+	// With map voting enabled and no `default` pinned in config/maps.txt, that is a live hazard rather
+	// than a theoretical one, and it presents exactly as "nothing we build persists".
+	var/expected_map = SSmapping.current_map?.map_name
+	if(!istext(raw["map"]))
+		// Pre-lock snapshot: no map recorded. Trust it (there is nothing else to go on) but say so, and
+		// the next save will stamp the name in.
+		log_world("PERSISTENT_MAP: manifest predates map-name locking; assuming it belongs to '[expected_map]'.")
+	else if(raw["map"] != expected_map)
+		persistent_snapshot_rejected = "snapshot map '[raw["map"]]' != current map '[expected_map]'"
+		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; discarding it, and THIS ROUND WILL NOT SAVE so that snapshot survives. Pin the map (config/maps.txt `default`) to stop this.")
+		return null
 	if(raw["maxx"] != world.maxx || raw["maxy"] != world.maxy)
-		log_world("PERSISTENT_MAP: snapshot size [raw["maxx"]]x[raw["maxy"]] != [world.maxx]x[world.maxy]; discarding snapshot.")
+		persistent_snapshot_rejected = "snapshot size [raw["maxx"]]x[raw["maxy"]] != [world.maxx]x[world.maxy]"
+		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; discarding it, and THIS ROUND WILL NOT SAVE so that snapshot survives.")
 		return null
 
 	var/list/raw_levels = raw["levels"]
