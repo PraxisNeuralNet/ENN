@@ -14,6 +14,10 @@
 	/// payloads must ride this sidecar, never TGM vars: the DMM reader corrupts nested list
 	/// literals (design sec 12.12 / PERSISTENT_MAP_BUGS.md sec 0).
 	var/list/payload_collector
+	/// TRUE only while restore_persistent_item() is constructing an item from a saved record. Some
+	/// storage types populate hazardous random defaults from Initialize(); those defaults must not
+	/// exist briefly before the authoritative payload replaces them.
+	var/restoring_persistent_item = FALSE
 
 /// Register a nested payload for the atom currently being serialized by write_map(). No-ops
 /// outside a persistent snapshot pass. Coordinates come from the atom's turf so contained/

@@ -360,7 +360,15 @@
 
 	// BORN IN PLACE. No turf, no move, nothing to spill.
 	var/atom/cradle = persistent_item_cradle(destination)
-	var/obj/item/item = new item_path(cradle)
+	var/obj/item/item
+	SSpersistence.restoring_persistent_item = TRUE
+	try
+		item = new item_path(cradle)
+	catch(var/exception/construction_error)
+		SSpersistence.restoring_persistent_item = FALSE
+		log_world("PERSISTENT_MAP: failed to construct restored item [item_path] inside [destination]: [construction_error]")
+		return null
+	SSpersistence.restoring_persistent_item = FALSE
 
 	var/clean_name = sanitize_persistent_text(item_data["name"], PERSISTENT_MAX_NAME_LEN)
 	if(clean_name)

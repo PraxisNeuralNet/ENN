@@ -388,13 +388,38 @@
 	inhand_icon_state = "satchel-flat"
 	w_class = WEIGHT_CLASS_NORMAL //Can fit in backpacks itself.
 	storage_type = /datum/storage/backpack/satchel_flat
+	// SPLURT EDIT ADDITION - PERSISTENT_MAP - set before storage Initialize calls PopulateContents().
+	// A saved satchel's payload is authoritative; its random default loot must never briefly exist.
+	var/persistent_population_suppressed = FALSE
 
 /obj/item/storage/backpack/satchel/flat/Initialize(mapload)
+	// SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP
+	// DMM-loaded satchels otherwise roll four NEW contraband spawners before the payload walk wipes
+	// and replaces them. That temporary loadout can include fireworks, frag grenades and volatile
+	// containers, all exposed above the floor because the original levelupdate signal preceded atom
+	// initialization. Suppress fresh population and hide the saved shell as soon as its element exists.
+	var/turf/satchel_turf = get_turf(src)
+	persistent_population_suppressed = mapload \
+		&& satchel_turf \
+		&& is_persistent_level(satchel_turf.z) \
+		&& (SSmapping.persistent_snapshot_staging || SSmapping.persistent_station_loaded)
+	// SPLURT EDIT ADDITION END - PERSISTENT_MAP
 	. = ..()
 	AddElement(/datum/element/undertile, TRAIT_T_RAY_VISIBLE, INVISIBILITY_MAXIMUM, use_anchor = TRUE) // SKYRAT EDIT - Ghosts can't see smuggler's satchels
 	ADD_TRAIT(src, TRAIT_CONTRABAND_BLOCKER, INNATE_TRAIT)
+	// SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP
+	if(persistent_population_suppressed)
+		SEND_SIGNAL(src, COMSIG_OBJ_HIDE, satchel_turf.underfloor_accessibility)
+	persistent_population_suppressed = FALSE
+	// SPLURT EDIT ADDITION END - PERSISTENT_MAP
 
 /obj/item/storage/backpack/satchel/flat/PopulateContents()
+	// SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP
+	// Covers both the DMM shell above and satchels born inside a restored container record. Normal
+	// round-time purchases/spawns still receive their random contraband exactly as before.
+	if(persistent_population_suppressed || SSpersistence?.restoring_persistent_item)
+		return
+	// SPLURT EDIT ADDITION END - PERSISTENT_MAP
 	for(var/items in 1 to 4)
 		new /obj/effect/spawner/random/contraband(src)
 
