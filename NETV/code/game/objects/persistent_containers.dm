@@ -237,6 +237,67 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// needs anyway - its icon state is keyed to how many books it holds.
 	return ..()
 
+// =================================================================================================
+// Fire extinguisher cabinets - dedicated single-slot ownership (forty-sixth pass)
+// =================================================================================================
+// The cabinet is not /datum/storage-backed. It owns one raw-contents item through the
+// `stored_extinguisher` reference, and Initialize(mapload) unconditionally creates a fresh full
+// extinguisher. The DMM only carries the cabinet shell, so an empty cabinet regenerated its item on
+// every snapshot boot. A dedicated record is required because EMPTY is authoritative state too.
+
+/obj/structure/extinguisher_cabinet/get_save_vars()
+	. = ..()
+	. += NAMEOF(src, opened)
+	var/list/extinguisher_record = stored_extinguisher?.serialize_persistent(1)
+	SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_EXTINGUISHER_CABINET, list(
+		"opened" = opened,
+		"occupied" = !isnull(stored_extinguisher),
+		"extinguisher" = extinguisher_record,
+	))
+	return .
+
+/// Replace the mapload-generated default with the authoritative saved slot. If an occupied record
+/// is malformed, retain the default instead of wiping it; only an explicit `occupied = FALSE` may
+/// empty the cabinet.
+/obj/structure/extinguisher_cabinet/proc/apply_persistent_extinguisher_cabinet(list/data)
+	if(!islist(data) || !("occupied" in data))
+		return
+	opened = !!data["opened"]
+	if(!data["occupied"])
+		QDEL_NULL(stored_extinguisher)
+		update_appearance(UPDATE_ICON)
+		return
+
+	var/list/extinguisher_record = data["extinguisher"]
+	var/extinguisher_path = islist(extinguisher_record) ? text2path(extinguisher_record["type"]) : null
+	if(!ispath(extinguisher_path, /obj/item/extinguisher) || !is_persistent_type_allowed(extinguisher_path))
+		log_world("PERSISTENT_MAP: invalid occupied extinguisher-cabinet record at [AREACOORD(src)]; keeping the mapload default.")
+		update_appearance(UPDATE_ICON)
+		return
+
+	QDEL_NULL(stored_extinguisher)
+	var/obj/item/extinguisher/restored = restore_persistent_item(extinguisher_record, src, 1)
+	if(!istype(restored))
+		qdel(restored)
+		log_world("PERSISTENT_MAP: failed to restore occupied extinguisher cabinet at [AREACOORD(src)]; cabinet left empty.")
+		update_appearance(UPDATE_ICON)
+		return
+	stored_extinguisher = restored
+	update_appearance(UPDATE_ICON)
+
+/// Extinguishers already ride the item-record reagent path for their fill level. Preserve the
+/// user-visible nozzle safety as well so an occupied cabinet round-trips the exact item state.
+/obj/item/extinguisher/serialize_persistent(depth = 1)
+	. = ..()
+	.["safety"] = safety
+
+/obj/item/extinguisher/deserialize_persistent(list/data, depth = 1)
+	. = ..()
+	if(!isnull(data["safety"]))
+		safety = !!data["safety"]
+		// attack_self() owns this sprite directly; there is no extinguisher update_icon_state().
+		icon_state = "[sprite_name][!safety]"
+
 /// Books carry player-authored text, which is the entire point of persisting them.
 /obj/item/book/has_persistent_item_state()
 	return TRUE
@@ -1354,6 +1415,10 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 						var/obj/machinery/iv_drip/drip = target
 						if(istype(drip))
 							drip.apply_persistent_iv_container(data)
+					if(PERSISTENT_PAYLOAD_EXTINGUISHER_CABINET)
+						var/obj/structure/extinguisher_cabinet/cabinet = target
+						if(istype(cabinet))
+							cabinet.apply_persistent_extinguisher_cabinet(data)
 					else
 						log_world("PERSISTENT_MAP: unknown payload kind [kind] at ([entry["x"]],[entry["y"]],[z]); skipped.")
 				applied++

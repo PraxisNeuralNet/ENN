@@ -47,6 +47,7 @@
 /// Payload entry kinds - which restore path consumes the entry's "data".
 #define PERSISTENT_PAYLOAD_CONTENTS "contents" // generic container item records (closets/crates)
 #define PERSISTENT_PAYLOAD_ITEM_RECORD "item_record" // full item state record applied in place (floor items, MODs)
+#define PERSISTENT_PAYLOAD_EXTINGUISHER_CABINET "extinguisher_cabinet" // authoritative empty/occupied cabinet slot
 #define PERSISTENT_PAYLOAD_SSU_SLOTS "ssu_slots" // suit storage unit per-slot records applied in place
 #define PERSISTENT_PAYLOAD_TURF_DECALS "turf_decals" // turf decal element parameter records
 #define PERSISTENT_PAYLOAD_SHELF_CRATES "shelf_crates" // cargo shelf crate records (slot-loaded closets)
