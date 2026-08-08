@@ -526,8 +526,9 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	/// stock parts like power cells). Machines otherwise reload with their circuit's tier-1 defaults,
 	/// resetting every upgrade. Only written when something is actually upgraded.
 	var/list/persistent_stock_parts
-	/// Persistent-map snapshot of a LOCAL material container's contents ("[material typepath]" ->
-	/// amount; flat assoc of scalars - DMM-safe). Populated only for machine types that opt in via
+	/// Restore staging for a LOCAL material container's contents ("[material typepath]" -> amount).
+	/// New snapshots carry this in the JSON payload sidecar; the saved var remains solely so snapshots
+	/// written by the older inline-DMM implementation still load. Populated only for types opting in via
 	/// get_persistent_material_container() (autolathe, etc. - the ore silo keeps its own bespoke
 	/// persistent_silo_materials for save compatibility). Consumed by the payload walk AFTER
 	/// stock-part restore, so upgraded matter-bin capacity is in place before re-insertion.
@@ -552,6 +553,19 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	persistent_machine_materials = null
 	if(!islist(mats))
 		return
+	// An occupied record must contain at least one usable material. Do not make a malformed/tampered
+	// record authoritative and clear a machine merely because it happened to decode as a list.
+	var/has_usable_material = !length(mats) // an explicit empty store is authoritative
+	if(!has_usable_material)
+		for(var/mat_text in mats)
+			var/mat_path = text2path(mat_text)
+			var/amount = mats[mat_text]
+			if(ispath(mat_path, /datum/material) && isnum(amount) && amount > 0)
+				has_usable_material = TRUE
+				break
+	if(!has_usable_material)
+		log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] had a material store with no usable entries; current contents left unchanged.")
+		return
 	var/datum/material_container/holder = get_persistent_material_container()
 	if(!istype(holder))
 		log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] had a saved material store but no persistent material container; [length(mats)] material\s dropped.")
@@ -568,6 +582,10 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		if(!holder.max_amount)
 			log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] has ZERO material capacity even after RefreshParts(); [length(mats)] material\s cannot be restored. Check its matter bins / component_parts.")
 			return
+	// Saved state is authoritative. This is normally all zeroes on a freshly mapped autolathe, but
+	// clearing first also prevents duplication if a future opted-in machine initializes with stock.
+	for(var/datum/material/current_mat as anything in holder.materials)
+		holder.materials[current_mat] = 0
 	var/restored = 0
 	var/requested = 0
 	var/rejected = 0
@@ -599,8 +617,10 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// applies before init so the panel sprite draws correctly on reload. (Added BEFORE the
 	// component_parts early-return: airlocks and other non-frame machines have no parts list.)
 	. += NAMEOF(src, panel_open)
-	// Local material container snapshot (also before the early return, for the same reason).
-	persistent_machine_materials = null
+	// Local material container snapshot (also before the early return, for the same reason). This
+	// used to be appended to the DMM as a flat associative saved var. Live snapshots showed that
+	// handoff losing the store before the post-load consumer saw it, so it now rides the already
+	// transactional JSON payload sidecar. The wrapper deliberately records an empty store too.
 	var/datum/material_container/mat_holder = get_persistent_material_container()
 	if(istype(mat_holder))
 		var/list/stored = list()
@@ -608,15 +628,11 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 			var/mat_amount = mat_holder.materials[stored_mat]
 			if(mat_amount > 0)
 				stored["[stored_mat.type]"] = mat_amount
+		SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_MACHINE_MATERIALS, list(
+			"materials" = stored,
+		))
 		if(length(stored))
-			persistent_machine_materials = stored
-			. += NAMEOF(src, persistent_machine_materials)
-			// Save-side counterpart to the restore log (thirty-ninth pass). Gated on payload_collector
-			// so a vanilla admin map export stays quiet - the same "we are inside a persistent snapshot
-			// pass" signal collect_persistent_payload() uses. Between this line and the restore line,
-			// "the autolathe isn't saving its materials" splits cleanly: NO line here means the save
-			// side never saw the materials; a line here with no restore line means the var did not
-			// survive the DMM round-trip; both present with restored 0 means the insert was refused.
+			// Save-side counterpart to the restore log. Gated so vanilla admin exports stay quiet.
 			if(!isnull(SSpersistence.payload_collector))
 				log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] material store SAVED - [length(stored)] material\s, [mat_holder.total_amount()] units (capacity [mat_holder.max_amount]).")
 	persistent_stock_parts = null
@@ -1419,6 +1435,13 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 						var/obj/structure/extinguisher_cabinet/cabinet = target
 						if(istype(cabinet))
 							cabinet.apply_persistent_extinguisher_cabinet(data)
+					if(PERSISTENT_PAYLOAD_MACHINE_MATERIALS)
+						var/obj/machinery/material_machine = target
+						var/list/material_records = data["materials"]
+						if(istype(material_machine) && islist(material_records))
+							// Stage only. The machinery pass below restores component parts first, then
+							// calls apply_persistent_machine_materials() with the correct bin capacity.
+							material_machine.persistent_machine_materials = material_records.Copy()
 					else
 						log_world("PERSISTENT_MAP: unknown payload kind [kind] at ([entry["x"]],[entry["y"]],[z]); skipped.")
 				applied++
@@ -1445,7 +1468,9 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 				log_world("PERSISTENT_MAP: stock-part restore failed on [machine] at [AREACOORD(machine)]: [parts_error]")
 		// AFTER stock parts: matter-bin upgrades set the container's capacity, and the insert
 		// clamps to free space - restoring materials first would drop the overflow.
-		if(machine.persistent_machine_materials)
+		// islist(), rather than truthiness, preserves an explicitly empty authoritative store.
+		// This consumes both new sidecar staging and the older inline-DMM saved var.
+		if(islist(machine.persistent_machine_materials))
 			try
 				machine.apply_persistent_machine_materials()
 				material_stores_applied++
