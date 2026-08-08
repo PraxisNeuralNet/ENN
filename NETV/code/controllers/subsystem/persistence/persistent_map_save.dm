@@ -5,6 +5,9 @@
 	/// TRUE while a persistent snapshot save is in flight. Guards BOTH the map and actor layers so a
 	/// future periodic saver can't interleave writes with the round-end save (design sec 12.7).
 	var/map_saving = FALSE
+	/// Result of the most recently completed guarded save. A caller that waited on map_saving must
+	/// receive the actual outcome, not assume that "the flag cleared" means the manifest committed.
+	var/map_save_last_success = FALSE
 	/// Sidecar payload collector for the z-level currently being written by write_map(). Non-null
 	/// ONLY during a persistent snapshot pass - get_save_vars() overrides check this before
 	/// registering payloads, so a vanilla admin map export never collects anything. Nested record
@@ -55,26 +58,38 @@
 		if(map_saving)
 			log_world("PERSISTENT_MAP: in-flight save did not finish within [PERSISTENT_SAVE_WAIT_LIMIT / 10] seconds; giving up on waiting. The snapshot may not be committed.")
 			return FALSE
-		log_world("PERSISTENT_MAP: in-flight save finished after [waited / 10] seconds; not re-saving.")
-		return TRUE
+		log_world("PERSISTENT_MAP: in-flight save finished after [waited / 10] seconds; result was [map_save_last_success ? "COMMITTED" : "FAILED"].")
+		return map_save_last_success
 	log_world("PERSISTENT_MAP: snapshot save starting (map '[SSmapping.current_map?.map_name]', maxz [world.maxz]).")
 	map_saving = TRUE
-	. = write_persistent_map_files()
-	if(.)
-		save_persistent_mobs()
-		save_persistent_techweb() // R&D layer rides the same commit gate (persistent_techweb.dm)
-		log_world("PERSISTENT_MAP: snapshot COMMITTED.")
-	else
-		log_world("PERSISTENT_MAP: map layer save failed; actor layer skipped so both layers stay in sync with the previous snapshot.")
+	map_save_last_success = FALSE
+	try
+		. = write_persistent_map_files()
+		if(.)
+			save_persistent_mobs()
+			save_persistent_techweb() // R&D layer rides the same commit gate (persistent_techweb.dm)
+			log_world("PERSISTENT_MAP: snapshot COMMITTED.")
+		else
+			log_world("PERSISTENT_MAP: map layer save failed; actor layer skipped so both layers stay in sync with the previous snapshot.")
+	catch(var/exception/save_error)
+		. = FALSE
+		log_world("PERSISTENT_MAP: snapshot save aborted by runtime: [save_error]. Previous committed slot remains active.")
+	map_save_last_success = .
 	map_saving = FALSE
 
 /// Map-only guarded entry, kept for standalone use (callers that want just the physical world).
 /// Prefer save_persistent_snapshot() so the actor layer stays in sync with the map.
 /datum/controller/subsystem/persistence/proc/save_persistent_map()
 	if(map_saving)
-		return
+		return FALSE
 	map_saving = TRUE
-	write_persistent_map_files()
+	map_save_last_success = FALSE
+	try
+		. = write_persistent_map_files()
+	catch(var/exception/save_error)
+		. = FALSE
+		log_world("PERSISTENT_MAP: map-only save aborted by runtime: [save_error]. Previous committed slot remains active.")
+	map_save_last_success = .
 	map_saving = FALSE
 
 /// Serializes every persistent z-level (Station only) to one TGM .dmm file + one payload sidecar
@@ -91,8 +106,24 @@
 		log_world("PERSISTENT_MAP: REFUSING TO SAVE - this boot rejected the snapshot on disk ([SSmapping.persistent_snapshot_rejected]) and loaded shipped maps instead. Saving now would overwrite a good snapshot with a fresh station.")
 		return FALSE
 
+	// The manifest used to be called a commit marker while every pass overwrote the SAME z<N>.dmm
+	// and payloads_z<N>.json files that the old manifest already referenced. That is not a commit
+	// protocol: a reboot/crash between those two writes left the old manifest pointing at a NEW DMM
+	// plus an OLD area sidecar. Custom-area geometry would then be absent or applied to the wrong turf
+	// generation, presenting as mapped station areas overwriting blueprint-defined areas.
+	//
+	// Double-buffer the complete map generation instead. The primary manifest keeps pointing at the
+	// active slot while the inactive slot is written and verified. Only after every DMM and payload is
+	// present do we rotate the primary manifest to .bak and commit a manifest for the new slot.
+	// Use the generation that actually produced this running world. In particular, if the primary
+	// manifest was torn and boot recovered through manifest.json.bak, reparsing the primary here could
+	// select the wrong slot and overwrite the only loadable generation before the new commit exists.
+	var/current_slot = SSmapping.persistent_snapshot_slot
+	var/target_slot = current_slot == "a" ? "b" : "a"
+
 	var/list/manifest = list(
 		"version" = PERSISTENT_MAP_VERSION,
+		"slot" = target_slot,
 		// Identity, not just geometry - see load_persistent_manifest(). Same-size maps are common, so
 		// dimensions alone let a snapshot cross-load onto the wrong station.
 		"map" = SSmapping.current_map?.map_name,
@@ -231,31 +262,33 @@
 			log_world("PERSISTENT_MAP: write_map produced no data for z[z] ([role]); aborting snapshot, previous manifest kept.")
 			return FALSE
 
-		// BYOND has no atomic rename, so we rotate a single .bak before overwriting: a crash
-		// mid-write still leaves a loadable prior snapshot for this level (design sec 6.5).
-		var/final_path = "[PERSISTENT_MAP_DIR]/z[z].dmm"
-		fdel("[final_path].bak")
-		if(fexists(final_path))
-			fcopy(final_path, "[final_path].bak")
+		// Write only the inactive generation. The active manifest cannot observe this file until the
+		// final commit, and the corresponding payload below uses the same slot.
+		var/final_name = "z[z]_[target_slot].dmm"
+		var/final_path = "[PERSISTENT_MAP_DIR]/[final_name]"
 		fdel(final_path)
 		rustg_file_write(map_text, final_path)
+		if(!fexists(final_path) || !length(file2text(final_path)))
+			log_world("PERSISTENT_MAP: failed to verify written map file [final_path]; aborting snapshot, active slot '[current_slot || "legacy"]' kept.")
+			return FALSE
 
 		// Sidecar payload file for this level (nested container/decal/item records - design sec
-		// 12.12). Written BEFORE the manifest so the commit marker covers it; same .bak rotation.
+		// 12.12). It is written to the SAME inactive slot before the manifest can reference either.
 		// Always written (even with zero entries) so the manifest reference is always satisfiable.
-		var/payload_name = "payloads_z[z].json"
+		var/payload_name = "payloads_z[z]_[target_slot].json"
 		var/payload_path = "[PERSISTENT_MAP_DIR]/[payload_name]"
-		fdel("[payload_path].bak")
-		if(fexists(payload_path))
-			fcopy(payload_path, "[payload_path].bak")
 		fdel(payload_path)
 		rustg_file_write(json_encode(list("version" = PERSISTENT_PAYLOAD_VERSION, "entries" = level_payloads)), payload_path)
+		var/list/written_payload = fexists(payload_path) ? safe_json_decode(file2text(payload_path)) : null
+		if(!islist(written_payload) || written_payload["version"] != PERSISTENT_PAYLOAD_VERSION || !islist(written_payload["entries"]))
+			log_world("PERSISTENT_MAP: failed to verify written payload file [payload_path]; aborting snapshot, active slot '[current_slot || "legacy"]' kept.")
+			return FALSE
 
 		ordinal_by_role[role] = (ordinal_by_role[role] || 0) + 1
 		manifest["levels"] += list(list(
 			"role" = role,
 			"ordinal" = ordinal_by_role[role],
-			"file" = "z[z].dmm",
+			"file" = final_name,
 			"payloads" = payload_name,
 			// Stored verbatim and re-applied on load so Up/Down multi-z linkage survives (design sec 5.2).
 			"traits" = SSmapping.z_list[z]?.traits,
@@ -287,7 +320,21 @@
 		log_world("PERSISTENT_MAP: no persistent levels serialized; manifest not written.")
 		return FALSE
 
-	// Written LAST. Presence + matching version is the only "snapshot committed" signal the loader
-	// trusts; a crash before this point leaves the previous manifest (or none) -> clean fallback.
+	// Written LAST. Preserve the manifest that actually loaded this world. Ordinarily that means
+	// rotate primary to backup. If this boot RECOVERED from backup, however, the primary is precisely
+	// the damaged candidate we rejected: never copy it over the only known-good manifest. Leave the
+	// backup untouched until the new primary has committed and verified.
+	if(!SSmapping.persistent_snapshot_loaded_from_backup)
+		fdel(PERSISTENT_MAP_MANIFEST_BACKUP)
+		if(fexists(PERSISTENT_MAP_MANIFEST) && !fcopy(PERSISTENT_MAP_MANIFEST, PERSISTENT_MAP_MANIFEST_BACKUP))
+			log_world("PERSISTENT_MAP: could not preserve the previous manifest; refusing to replace it.")
+			return FALSE
+	fdel(PERSISTENT_MAP_MANIFEST)
 	rustg_file_write(json_encode(manifest), PERSISTENT_MAP_MANIFEST)
+	var/list/committed_manifest = fexists(PERSISTENT_MAP_MANIFEST) ? safe_json_decode(file2text(PERSISTENT_MAP_MANIFEST)) : null
+	if(!islist(committed_manifest) || committed_manifest["version"] != PERSISTENT_MAP_VERSION || committed_manifest["slot"] != target_slot)
+		log_world("PERSISTENT_MAP: new manifest failed verification; backup manifest remains available for the next boot.")
+		return FALSE
+	SSmapping.persistent_snapshot_slot = target_slot
+	SSmapping.persistent_snapshot_loaded_from_backup = FALSE
 	return TRUE

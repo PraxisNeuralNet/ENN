@@ -165,6 +165,8 @@
 /datum/persistent_map_manifest
 	/// Snapshot format version (always == PERSISTENT_MAP_VERSION once validated).
 	var/version
+	/// Double-buffer slot ("a" or "b"). Null only for a legacy unslotted v2 manifest.
+	var/slot
 	/// world.maxx / world.maxy the snapshot was taken at (load is size-locked to these).
 	var/saved_maxx
 	var/saved_maxy

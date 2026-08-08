@@ -7,6 +7,9 @@
 /// Manifest path. Written LAST as the "save committed" marker - load only trusts
 /// files referenced by a present, version-matching manifest (design sec 6.5).
 #define PERSISTENT_MAP_MANIFEST "data/persistent_map/manifest.json"
+/// Previous committed manifest. Snapshot files are double-buffered, so this remains a complete,
+/// loadable generation if the primary manifest is interrupted while being replaced.
+#define PERSISTENT_MAP_MANIFEST_BACKUP "data/persistent_map/manifest.json.bak"
 /// Bump whenever the snapshot format OR the base map's world.maxx/maxy change.
 /// A mismatch invalidates the snapshot and load falls back to shipped maps (design sec 5.2).
 /// v2 (2026-07-07): nested payloads moved out of TGM vars into per-level sidecar JSON (the DMM

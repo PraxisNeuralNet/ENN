@@ -24,20 +24,52 @@
 	/// late for anything that runs DURING mapload - INITIALIZE_IMMEDIATE atoms in particular. Guards
 	/// that must fire mid-load check this as well (see the modular-map-root guard below).
 	var/persistent_snapshot_staging = FALSE
+	/// Double-buffer slot that was actually loaded this boot. This deliberately follows the validated
+	/// manifest chosen by load_persistent_manifest(), including backup-manifest recovery; the next save
+	/// must write the opposite slot or it could overwrite the generation the running world came from.
+	var/persistent_snapshot_slot
+	/// TRUE when this boot's validated generation came from manifest.json.bak. The next commit must
+	/// leave that backup in place until the new primary has been written and verified; rotating the
+	/// already-invalid primary over it would destroy the only recovery point.
+	var/persistent_snapshot_loaded_from_backup = FALSE
 
-/// Reads and validates the on-disk manifest. Returns a /datum/persistent_map_manifest only when
-/// the snapshot is fully trustworthy; otherwise returns null so the caller falls back to shipped
-/// maps. Every failure is logged loudly  -  a corrupt snapshot must never brick boot (design sec 5.2).
+/// Reads the primary committed manifest, falling back to its previous-generation backup if the
+/// primary was interrupted during replacement. Each manifest points at a complete double-buffer
+/// slot, so falling back never mixes one DMM generation with another generation's area payloads.
 /datum/controller/subsystem/mapping/proc/load_persistent_manifest()
-	if(!fexists(PERSISTENT_MAP_MANIFEST))
-		return null
+	persistent_snapshot_rejected = null
+	persistent_snapshot_loaded_from_backup = FALSE
+	var/primary_rejection
+	if(fexists(PERSISTENT_MAP_MANIFEST))
+		var/datum/persistent_map_manifest/primary = load_persistent_manifest_file(PERSISTENT_MAP_MANIFEST, "primary")
+		if(primary)
+			return primary
+		primary_rejection = persistent_snapshot_rejected
+		persistent_snapshot_rejected = null
 
-	var/list/raw = safe_json_decode(file2text(PERSISTENT_MAP_MANIFEST))
+	if(fexists(PERSISTENT_MAP_MANIFEST_BACKUP))
+		var/datum/persistent_map_manifest/backup = load_persistent_manifest_file(PERSISTENT_MAP_MANIFEST_BACKUP, "backup")
+		if(backup)
+			persistent_snapshot_rejected = null
+			persistent_snapshot_loaded_from_backup = TRUE
+			log_world("PERSISTENT_MAP: primary manifest was unavailable or invalid; recovered the previous committed snapshot from manifest.json.bak (slot '[backup.slot || "legacy"]').")
+			return backup
+
+	if(!persistent_snapshot_rejected)
+		persistent_snapshot_rejected = primary_rejection
+	if(persistent_snapshot_rejected)
+		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; no compatible committed manifest remains, and THIS ROUND WILL NOT SAVE over it.")
+	return null
+
+/// Validate one manifest candidate. Identity mismatches are recorded so a boot which could not use
+/// either committed generation refuses to overwrite somebody else's station at round end.
+/datum/controller/subsystem/mapping/proc/load_persistent_manifest_file(manifest_path, manifest_label)
+	var/list/raw = safe_json_decode(file2text(manifest_path))
 	if(!islist(raw))
-		log_world("PERSISTENT_MAP: manifest present but unreadable; using shipped maps.")
+		log_world("PERSISTENT_MAP: [manifest_label] manifest present but unreadable; trying recovery/fallback.")
 		return null
 	if(raw["version"] != PERSISTENT_MAP_VERSION)
-		log_world("PERSISTENT_MAP: manifest version [json_encode(raw["version"])] != [PERSISTENT_MAP_VERSION]; discarding snapshot.")
+		log_world("PERSISTENT_MAP: [manifest_label] manifest version [json_encode(raw["version"])] != [PERSISTENT_MAP_VERSION]; trying recovery/fallback.")
 		return null
 	// Snapshots are MAP-locked as well as size-locked. Size alone is not an identity: most station maps
 	// in rotation share 255x255, so a snapshot taken on one of them passed every check and got stamped
@@ -50,27 +82,28 @@
 		// the next save will stamp the name in.
 		log_world("PERSISTENT_MAP: manifest predates map-name locking; assuming it belongs to '[expected_map]'.")
 	else if(raw["map"] != expected_map)
-		persistent_snapshot_rejected = "snapshot map '[raw["map"]]' != current map '[expected_map]'"
-		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; discarding it, and THIS ROUND WILL NOT SAVE so that snapshot survives. Pin the map (config/maps.txt `default`) to stop this.")
+		persistent_snapshot_rejected = "[manifest_label] snapshot map '[raw["map"]]' != current map '[expected_map]'"
+		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; trying recovery/fallback. Pin the map (config/maps.txt `default`) to stop this.")
 		return null
 	if(raw["maxx"] != world.maxx || raw["maxy"] != world.maxy)
-		persistent_snapshot_rejected = "snapshot size [raw["maxx"]]x[raw["maxy"]] != [world.maxx]x[world.maxy]"
-		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; discarding it, and THIS ROUND WILL NOT SAVE so that snapshot survives.")
+		persistent_snapshot_rejected = "[manifest_label] snapshot size [raw["maxx"]]x[raw["maxy"]] != [world.maxx]x[world.maxy]"
+		log_world("PERSISTENT_MAP: [persistent_snapshot_rejected]; trying recovery/fallback.")
 		return null
 
 	var/list/raw_levels = raw["levels"]
 	if(!islist(raw_levels) || !length(raw_levels))
-		log_world("PERSISTENT_MAP: manifest has no levels; using shipped maps.")
+		log_world("PERSISTENT_MAP: [manifest_label] manifest has no levels; trying recovery/fallback.")
 		return null
 
 	var/datum/persistent_map_manifest/manifest = new
 	manifest.version = raw["version"]
+	manifest.slot = (raw["slot"] == "a" || raw["slot"] == "b") ? raw["slot"] : null
 	manifest.saved_maxx = raw["maxx"]
 	manifest.saved_maxy = raw["maxy"]
 
 	for(var/list/record as anything in raw_levels)
 		if(!islist(record))
-			log_world("PERSISTENT_MAP: malformed level record; discarding snapshot.")
+			log_world("PERSISTENT_MAP: [manifest_label] manifest has a malformed level record; trying recovery/fallback.")
 			return null
 		var/file_name = record["file"]
 		if(!istext(file_name))
@@ -80,12 +113,13 @@
 		// separators or "..", so a tampered manifest can't read/write outside those dirs. Legitimate
 		// snapshots only ever use bare "z[z].dmm" names.
 		if(findtext(file_name, "/") || findtext(file_name, "\\") || findtext(file_name, ".."))
-			log_world("PERSISTENT_MAP: suspicious snapshot file name '[file_name]'; discarding snapshot.")
+			log_world("PERSISTENT_MAP: [manifest_label] manifest has suspicious snapshot file name '[file_name]'; trying recovery/fallback.")
 			return null
 		// Every referenced file must exist before we commit to the persistent path. We can't cleanly
 		// roll back a partial multi-z load, so anything missing means full fallback (design sec 5.2).
-		if(!fexists("[PERSISTENT_MAP_DIR]/[file_name]"))
-			log_world("PERSISTENT_MAP: missing snapshot file [PERSISTENT_MAP_DIR]/[file_name]; discarding snapshot.")
+		var/map_path = "[PERSISTENT_MAP_DIR]/[file_name]"
+		if(!fexists(map_path) || !length(file2text(map_path)))
+			log_world("PERSISTENT_MAP: [manifest_label] manifest references missing/empty snapshot file [map_path]; trying recovery/fallback.")
 			return null
 		// Sidecar payload file (nested container/decal/item records - design sec 12.12). Same trust
 		// checks as the .dmm: traversal guard + must exist. The save always writes one per level.
@@ -93,7 +127,11 @@
 		if(!istext(payload_name) \
 			|| findtext(payload_name, "/") || findtext(payload_name, "\\") || findtext(payload_name, "..") \
 			|| !fexists("[PERSISTENT_MAP_DIR]/[payload_name]"))
-			log_world("PERSISTENT_MAP: missing/suspicious payload file reference '[payload_name]'; discarding snapshot.")
+			log_world("PERSISTENT_MAP: [manifest_label] manifest has a missing/suspicious payload reference '[payload_name]'; trying recovery/fallback.")
+			return null
+		var/list/payload = safe_json_decode(file2text("[PERSISTENT_MAP_DIR]/[payload_name]"))
+		if(!islist(payload) || payload["version"] != PERSISTENT_PAYLOAD_VERSION || !islist(payload["entries"]))
+			log_world("PERSISTENT_MAP: [manifest_label] manifest references unreadable/incomplete payload file '[payload_name]'; trying recovery/fallback.")
 			return null
 		manifest.levels += list(list(
 			"role" = record["role"],
@@ -161,6 +199,7 @@
 	// order (consumed by SSpersistence.apply_persistent_world_payloads(), matched to persistent
 	// z-levels by ordinal) and the expected fleet (consumed by shuttle reconciliation - BUG #7).
 	persistent_station_loaded = TRUE
+	persistent_snapshot_slot = manifest.slot
 	persistent_loaded_payloads = list()
 	persistent_expected_shuttles = list()
 	for(var/list/record as anything in records)
