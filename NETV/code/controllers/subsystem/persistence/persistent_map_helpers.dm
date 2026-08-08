@@ -36,6 +36,11 @@
 /// shuttle. Wiping the pod's turfs (or a fresh data/) restores the normal template spawn.
 /// Accepts an area instance or an area typepath.
 /proc/is_persistent_exempt_shuttle_area(area_or_path)
+	// Snapshot-only dynamic exemptions: hand-built custom shuttles and visiting ruin shuttles are
+	// unique live objects, not roundstart station fleet. Their areas must pass through write_map()
+	// so their hull/turfs/contents can accompany the operational mobile_shuttle sidecar record.
+	if(isarea(area_or_path) && SSpersistence?.persistent_shuttle_areas_for_snapshot?[area_or_path])
+		return TRUE
 	var/static/list/exempt_typecache = typecacheof(list(
 		/area/shuttle/auxiliary_base,
 		/area/shuttle/pod_1,
@@ -152,11 +157,9 @@
 		// non-persistent level and is unaffected; the portal bumper is /obj/effect and was already
 		// covered by the sweep above.
 		blacklist += typecacheof(list(/obj/machinery/gateway))
-		// ALL mobile docking ports are excluded (BUG #7 v3): shuttles are template-spawned every
-		// round, and a baked mobile port can never function - register() is only called by
-		// action_load/variant LateInitializes, so a snapshotted port loads as an inert object
-		// with a dead console. Shuttle-area turfs are already nooped by SAVE_SHUTTLEAREA_IGNORE;
-		// this covers any port caught outside a shuttle area mid-operation.
+		// ALL raw mobile docking ports are excluded (BUG #7 v3/v4). Ordinary fleet craft respawn
+		// from templates; selected unique craft reconstruct a fresh registered port from the validated
+		// mobile_shuttle sidecar. A raw baked port would be inert in either case.
 		blacklist += typecacheof(list(/obj/docking_port/mobile))
 	return blacklist
 

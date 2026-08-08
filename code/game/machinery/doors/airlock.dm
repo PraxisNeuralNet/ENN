@@ -218,7 +218,9 @@
 		INVOKE_ASYNC(src, PROC_REF(prison_open)) //Sleep gets called further down in open(), so we have to invoke async
 
 /obj/machinery/door/airlock/connect_to_shuttle(mapload, obj/docking_port/mobile/port, obj/docking_port/stationary/dock)
-	if(id_tag)
+	// SPLURT EDIT CHANGE - PERSISTENT_MAP (48th pass): a reconstructed custom shuttle relinks
+	// already-prefixed DMM state; make the transform idempotent instead of producing id_id_tag.
+	if(id_tag && findtext(id_tag, "[port.shuttle_id]_") != 1)
 		id_tag = "[port.shuttle_id]_[id_tag]"
 
 /obj/machinery/door/airlock/proc/update_other_id()

@@ -253,6 +253,10 @@ GLOBAL_LIST_INIT(save_file_chars, list(
 				//====Get turfs Data====
 				var/turf/place
 				var/area/location
+				// SPLURT EDIT CHANGE - PERSISTENT_MAP (48th pass): location below is reduced to a
+				// typepath for DMM output. Keep the live area instance's exemption decision as well,
+				// because unique custom/visiting shuttle exemptions are instance-scoped per snapshot.
+				var/persistent_exempt_shuttle_area = FALSE
 				var/turf/pull_from = locate((minx + x), (miny + y), (minz + z))
 				//If there is nothing there, save as a noop (For odd shapes)
 				if(isnull(pull_from))
@@ -268,9 +272,10 @@ GLOBAL_LIST_INIT(save_file_chars, list(
 					var/area/place_area = get_area(pull_from)
 					location = place_area.type
 					place = pull_from.type
+					persistent_exempt_shuttle_area = is_persistent_exempt_shuttle_area(place_area)
 
 				//====Saving shuttles only / non shuttles only====
-				var/is_shuttle_area = ispath(location, /area/shuttle) && !is_persistent_exempt_shuttle_area(location) // SPLURT EDIT CHANGE - PERSISTENT_MAP (26th pass): exempt shuttle areas (aux base) save as station content instead of being nooped - ORIGINAL: var/is_shuttle_area = ispath(location, /area/shuttle)
+				var/is_shuttle_area = ispath(location, /area/shuttle) && !persistent_exempt_shuttle_area && !is_persistent_exempt_shuttle_area(location) // SPLURT EDIT CHANGE - PERSISTENT_MAP (26th/48th pass): exempt shuttle types and selected live instances save as station content - ORIGINAL: var/is_shuttle_area = ispath(location, /area/shuttle)
 				if((is_shuttle_area && shuttle_area_flag == SAVE_SHUTTLEAREA_IGNORE) || (!is_shuttle_area && shuttle_area_flag == SAVE_SHUTTLEAREA_ONLY))
 					place = /turf/template_noop
 					location = /area/template_noop

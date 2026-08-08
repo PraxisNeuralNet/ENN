@@ -79,8 +79,11 @@
 	initialized_button = TRUE
 
 /obj/machinery/button/connect_to_shuttle(mapload, obj/docking_port/mobile/port, obj/docking_port/stationary/dock)
+	// SPLURT EDIT CHANGE - PERSISTENT_MAP (48th pass): relinking a persisted shuttle must not
+	// double-prefix the control id already saved in the DMM.
 	if(id)
-		id = "[port.shuttle_id]_[id]"
+		if(findtext(id, "[port.shuttle_id]_") != 1)
+			id = "[port.shuttle_id]_[id]"
 		setup_device()
 
 

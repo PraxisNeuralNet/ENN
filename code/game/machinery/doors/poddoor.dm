@@ -214,7 +214,9 @@
 	return ITEM_INTERACT_SUCCESS
 
 /obj/machinery/door/poddoor/connect_to_shuttle(mapload, obj/docking_port/mobile/port, obj/docking_port/stationary/dock)
-	id = "[port.shuttle_id]_[id]"
+	// SPLURT EDIT CHANGE - PERSISTENT_MAP (48th pass): reconstructed shuttle links are idempotent.
+	if(id && findtext(id, "[port.shuttle_id]_") != 1)
+		id = "[port.shuttle_id]_[id]"
 
 //"BLAST" doors are obviously stronger than regular doors when it comes to BLASTS.
 /obj/machinery/door/poddoor/ex_act(severity, target)

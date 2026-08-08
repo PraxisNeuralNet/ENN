@@ -53,6 +53,7 @@
 #define PERSISTENT_PAYLOAD_TURF_DECALS "turf_decals" // turf decal element parameter records
 #define PERSISTENT_PAYLOAD_SHELF_CRATES "shelf_crates" // cargo shelf crate records (slot-loaded closets)
 #define PERSISTENT_PAYLOAD_STATIONARY_DOCK "stationary_dock" // station docks occluded by a docked shuttle at save time (BUG #7 v3)
+#define PERSISTENT_PAYLOAD_MOBILE_SHUTTLE "mobile_shuttle" // unique custom/ruin shuttle geometry + operational port
 #define PERSISTENT_PAYLOAD_IV_DRIP "iv_drip" // IV drip attached container record (nineteenth pass)
 #define PERSISTENT_PAYLOAD_CUSTOM_AREA "custom_area" // blueprint-built area: type/name/member turfs (thirtieth pass)
 #define PERSISTENT_PAYLOAD_AREA_RENAME "area_rename" // player-renamed mapped area: type/name (thirtieth pass)
@@ -60,6 +61,9 @@
 /// BP_MAX_ROOM_SIZE=300 turfs but areas can be expanded repeatedly; a tampered file must not
 /// be able to swallow a whole z-level into one custom area).
 #define PERSISTENT_MAX_AREA_TURFS 2000
+/// Trust-boundary cap for one preserved custom/visiting shuttle. Core custom construction defaults
+/// to 250 turfs; this leaves room for admin-built/ruin craft without accepting a whole z-level.
+#define PERSISTENT_MAX_SHUTTLE_TURFS 2000
 
 // --- R&D techweb layer (thirty-third pass) -------------------------------------------------------
 /// The station science techweb's researched nodes + banked points (persistent_techweb.dm).

@@ -14,6 +14,11 @@
 	/// payloads must ride this sidecar, never TGM vars: the DMM reader corrupts nested list
 	/// literals (design sec 12.12 / PERSISTENT_MAP_BUGS.md sec 0).
 	var/list/payload_collector
+	/// Unique custom/visiting shuttles and their area instances selected for the z-level currently
+	/// being written. The area set is consulted by is_persistent_exempt_shuttle_area() so write_map's
+	/// normal SAVE_SHUTTLEAREA_IGNORE policy keeps only craft that cannot roundstart-respawn.
+	var/list/obj/docking_port/mobile/persistent_shuttles_for_snapshot
+	var/list/area/persistent_shuttle_areas_for_snapshot
 	/// TRUE only while restore_persistent_item() is constructing an item from a saved record. Some
 	/// storage types populate hazardous random defaults from Initialize(); those defaults must not
 	/// exist briefly before the authoritative payload replaces them.
@@ -153,18 +158,16 @@
 		// Save everything EXCEPT mobs. Actors are owned by the JSON layer (design sec 9), and write_map
 		// would otherwise bake simple animals into the DMM while save_persistent_mobs() also serializes
 		// them - duplicating every pet/critter on reload. Stripping SAVE_MOBS keeps the split clean.
-		// SAVE_SHUTTLEAREA_IGNORE (BUG #7 v3): shuttles are template-spawned every round (CentCom
-		// json docks + station roundstart_template docks), and a BAKED mobile docking port can never
-		// function - register() is only ever called by action_load/variant LateInitializes, so a
-		// baked shuttle loads as inert scenery with a dead console (the v2 DONTCARE failure). So
-		// shuttle-area turfs are nooped and fresh shuttles land each round. The one thing IGNORE
-		// destroys that must survive is any STATION stationary dock occluded by a docked shuttle at
-		// save time (this was v1's actual fleet-erasure mechanism) - those are captured below as
-		// stationary_dock payloads and recreated after load.
+		// SAVE_SHUTTLEAREA_IGNORE (BUG #7 v3/v4): ordinary fleet shuttles are template-spawned each
+		// round and remain nooped. prepare_persistent_shuttles_for_snapshot() selects the exceptional
+		// hand-built and visiting ruin craft whose live hulls have no station template replacement;
+		// their area instances pass through the exporter and a sidecar rebuilds each operational port.
+		// Stationary docks occluded by any docked shuttle are captured below as separate payloads.
 		// SAVE_OBJECT_PROPERTIES is stripped too: its only core user is the ore silo's on_object_saved(),
 		// which vomits the silo's materials as SIBLING sheet stacks in the TGM cell - on reload they pile
 		// up on the silo's turf and get re-saved plus re-vomited every round (compounding). Silo materials
 		// persist properly via persistent_silo_materials instead (persistent_containers.dm).
+		prepare_persistent_shuttles_for_snapshot(z)
 		payload_collector = list()
 		var/map_text = write_map(1, 1, z, world.maxx, world.maxy, z, ALL & ~SAVE_MOBS & ~SAVE_OBJECT_PROPERTIES, SAVE_SHUTTLEAREA_IGNORE, obj_blacklist)
 		// Stationary docks sitting under a docked shuttle live on shuttle-area turfs, which the
@@ -173,11 +176,6 @@
 		for(var/obj/docking_port/stationary/dock as anything in SSshuttle.stationary_docking_ports)
 			var/turf/dock_turf = get_turf(dock)
 			if(!dock_turf || dock_turf.z != z || !istype(get_area(dock), /area/shuttle))
-				continue
-			// Exempt-area tiles (aux base, twenty-sixth pass) are no longer nooped - the dock
-			// under them bakes into the DMM with its saved vars, so a payload copy would be
-			// redundant (the restore's already-has-a-dock guard would skip it anyway).
-			if(is_persistent_exempt_shuttle_area(get_area(dock)))
 				continue
 			collect_persistent_payload(dock, PERSISTENT_PAYLOAD_STATIONARY_DOCK, list(
 				"type" = "[dock.type]",
@@ -194,6 +192,10 @@
 				// The dock's own area (NOT the occluding shuttle's): area_type was captured at the
 				// dock's original Initialize, before any shuttle landed on it.
 				"area_type" = dock.area_type ? "[dock.area_type]" : null,
+				"port_destinations" = dock.port_destinations,
+				"hidden" = dock.hidden,
+				"delete_after" = dock.delete_after,
+				"override_can_dock_checks" = dock.override_can_dock_checks,
 			))
 		// Blueprint-built areas + player-renamed areas (thirtieth pass): TGM saves areas by TYPE
 		// only, so custom areas (instances of a shared base type - their cells merge into one
@@ -257,8 +259,13 @@
 		// One line per level so a "my blueprint rooms vanished" report can be split at the seam:
 		// zero saved here means the SAVE side lost them, non-zero means look at the restore log.
 		log_world("PERSISTENT_MAP: z[z] area records - [custom_areas_saved] custom area\s saved ([length(GLOB.custom_areas)] registered globally, [custom_areas_skipped] with no turfs on this level), [renames_saved] area rename\s saved.")
+		// Keep this last. Restoring a mobile shuttle needs stationary dock metadata and custom
+		// underlying areas to have been reconciled before the port is registered and linked.
+		collect_persistent_shuttles_for_snapshot(z)
 		var/list/level_payloads = payload_collector
 		payload_collector = null
+		persistent_shuttles_for_snapshot = null
+		persistent_shuttle_areas_for_snapshot = null
 		if(!map_text)
 			// Abort the WHOLE snapshot rather than skipping the level: a manifest missing a z passes
 			// every load-side validation and would boot an incomplete station with no fallback. Not

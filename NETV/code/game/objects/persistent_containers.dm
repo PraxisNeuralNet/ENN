@@ -1381,13 +1381,15 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 				continue
 			var/kind = entry["kind"]
 			// Turf-targeted / creation kinds first: no object matching involved.
-			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK || kind == PERSISTENT_PAYLOAD_CUSTOM_AREA || kind == PERSISTENT_PAYLOAD_AREA_RENAME)
+			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK || kind == PERSISTENT_PAYLOAD_MOBILE_SHUTTLE || kind == PERSISTENT_PAYLOAD_CUSTOM_AREA || kind == PERSISTENT_PAYLOAD_AREA_RENAME)
 				try
 					switch(kind)
 						if(PERSISTENT_PAYLOAD_TURF_DECALS)
 							tile.apply_persistent_decals(data)
 						if(PERSISTENT_PAYLOAD_STATIONARY_DOCK)
 							restore_persistent_stationary_dock(tile, data)
+						if(PERSISTENT_PAYLOAD_MOBILE_SHUTTLE)
+							restore_persistent_mobile_shuttle(tile, data, z)
 						if(PERSISTENT_PAYLOAD_CUSTOM_AREA)
 							restore_persistent_custom_area(tile, data, z)
 						if(PERSISTENT_PAYLOAD_AREA_RENAME)
@@ -1599,13 +1601,18 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 /// the trust-boundary payload: type/template path-validated, text sanitized, numerics forced.
 /// Skips tiles that already hold a stationary dock (e.g. a shipped-map dock that survived).
 /datum/controller/subsystem/persistence/proc/restore_persistent_stationary_dock(turf/tile, list/data)
-	if(locate(/obj/docking_port/stationary) in tile)
-		return
 	var/dock_path = text2path(data["type"])
 	if(!ispath(dock_path, /obj/docking_port/stationary))
 		log_world("PERSISTENT_MAP: rejected stationary dock type [data["type"]] at [AREACOORD(tile)].")
 		return
-	var/obj/docking_port/stationary/dock = new dock_path(tile)
+	// The dock may have baked directly into a preserved custom/visiting shuttle tile. Re-apply the
+	// sidecar metadata to that instance instead of creating a duplicate: in particular area_type
+	// must describe the area hidden UNDER the craft, not the shuttle area visible during mapload.
+	var/obj/docking_port/stationary/dock = locate(/obj/docking_port/stationary) in tile
+	var/created = FALSE
+	if(!dock)
+		dock = new dock_path(tile)
+		created = TRUE
 	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
 	if(clean_name)
 		dock.name = clean_name
@@ -1628,8 +1635,14 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	var/area_path = text2path(data["area_type"])
 	if(ispath(area_path, /area))
 		dock.area_type = area_path
+	var/clean_destinations = sanitize_persistent_text(data["port_destinations"], PERSISTENT_MAX_EDITED_TEXT_LEN)
+	if(clean_destinations)
+		dock.port_destinations = clean_destinations
+	dock.hidden = data["hidden"] ? TRUE : FALSE
+	dock.delete_after = data["delete_after"] ? TRUE : FALSE
+	dock.override_can_dock_checks = data["override_can_dock_checks"] ? TRUE : FALSE
 	// No further wiring needed: stationary docks fully self-manage. Initialize() already
 	// register()ed with SSshuttle, and if SSshuttle was initialized before this dock existed,
 	// LateInitialize() runs setup_shuttles(list(src)) - which load_roundstart()s any
 	// roundstart_template/json_key spawn for it. Both init orders are covered natively.
-	log_world("PERSISTENT_MAP: recreated occluded stationary dock '[dock.shuttle_id]' at [AREACOORD(tile)].")
+	log_world("PERSISTENT_MAP: [created ? "recreated" : "reconciled"] occluded stationary dock '[dock.shuttle_id]' at [AREACOORD(tile)].")
