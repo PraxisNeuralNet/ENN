@@ -139,6 +139,8 @@
 		// it was cold comes back at DEFAULT_REAGENT_TEMPERATURE otherwise, which can make a
 		// heat-gated reaction live. See the deserialize side for the full story.
 		.["reagent_temp"] = reagents.chem_temp
+		if(reagents.flags & NO_REACT)
+			.["reagents_no_react"] = TRUE
 	// Hand-edited (VV) vars (twentieth pass): items inside containers/inventories don't ride the
 	// DMM, so their recorded edits travel on the JSON record instead.
 	var/list/edited = serialize_persistent_edited_vars(src)
@@ -149,6 +151,37 @@
 	// authoritative on restore instead of regenerating its type-default contents.
 	if(atom_storage && depth < PERSISTENT_MAX_RECURSION_DEPTH)
 		.["contents"] = serialize_persistent_contents(src, depth + 1)
+
+/// Rebuild a reagent holder from a saved chem list without running reactions.
+/// The saved mixture existed at round end without exploding; walking it through intermediate
+/// add_reagent() states (or restoring a NO_REACT holder without the flag) is what detonates
+/// pyrotechnic recipes inside smuggler satchels. Holder.NO_REACT is set for the fill, each
+/// add is no_react, and handle_reactions() is never called afterwards.
+/proc/apply_persistent_reagent_list(datum/reagents/holder, list/chems, saved_temp, keep_no_react = FALSE)
+	if(!istype(holder) || !islist(chems))
+		return
+	var/had_no_react = !!(holder.flags & NO_REACT)
+	holder.flags |= NO_REACT
+	holder.clear_reagents()
+	if(isnum(saved_temp))
+		holder.set_temperature(clamp(saved_temp, PERSISTENT_MIN_REAGENT_TEMP, PERSISTENT_MAX_REAGENT_TEMP))
+	for(var/entry in chems)
+		if(!islist(entry))
+			continue
+		var/list/chem = entry
+		var/chem_path = chem["type"]
+		if(!ispath(chem_path, /datum/reagent))
+			chem_path = text2path("[chem_path]")
+		if(!ispath(chem_path, /datum/reagent))
+			continue
+		var/volume = chem["volume"]
+		if(istext(volume))
+			volume = text2num(volume)
+		if(!isnum(volume) || volume <= 0)
+			continue
+		holder.add_reagent(chem_path, clamp(volume, 0, PERSISTENT_MAX_REAGENT_VOLUME), reagtemp = holder.chem_temp, no_react = TRUE)
+	if(!keep_no_react && !had_no_react)
+		holder.flags &= ~NO_REACT
 
 /// Type-specific item restore hook. Base applies color + reagents; override for extra state
 /// (and call ..()).
@@ -175,34 +208,12 @@
 			icon_state = style_toggle.toggled_icon_state
 			update_appearance(UPDATE_ICON)
 	if(islist(data["reagents"]) && reagents)
-		reagents.clear_reagents() // saved contents are authoritative - a used medipen stays used
 		// NO_REACT + SAVED TEMPERATURE (thirty-eighth pass - "smuggler's satchels are exploding
 		// themselves and making holes in the floor").
-		//
-		// add_reagent() defaults to no_react = FALSE, so it ran handle_reactions() after EVERY
-		// addition. Restoring a mixture one reagent at a time therefore walked it through a series
-		// of INTERMEDIATE mixtures that never existed in-game, and a partial mix can react where the
-		// complete one does not. It also defaults reagtemp to DEFAULT_REAGENT_TEMPERATURE, so a
-		// mixture that was stable only because of its temperature came back hot/cold enough to fire
-		// a heat-gated recipe. tg's pyrotechnics recipes include reagent_explosion reactions, which
-		// call explosion() - and a smuggler's satchel is the perfect victim: it is stuffed with
-		// contraband reagent containers (thermite, blastoff ampoules, pill bottles) by
-		// PopulateContents(), and it sits UNDER a floor tile, so the crater appeared exactly where
-		// the satchel was hidden.
-		//
-		// The saved state was stable by definition - it existed at round end without reacting - so
-		// the correct restoration is to rebuild it and NOT re-run reaction checking at all. Every
-		// addition is no_react, carries the saved temperature so the holder equalises to the right
-		// value as it fills, and there is deliberately no handle_reactions() afterwards.
 		var/saved_temp = isnum(data["reagent_temp"]) \
 			? clamp(data["reagent_temp"], PERSISTENT_MIN_REAGENT_TEMP, PERSISTENT_MAX_REAGENT_TEMP) \
 			: reagents.chem_temp
-		for(var/list/chem as anything in data["reagents"])
-			if(!islist(chem))
-				continue
-			var/chem_path = text2path(chem["type"])
-			if(ispath(chem_path, /datum/reagent))
-				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME), reagtemp = saved_temp, no_react = TRUE)
+		apply_persistent_reagent_list(reagents, data["reagents"], saved_temp, keep_no_react = !!data["reagents_no_react"])
 		// Fill-state sprites derive from reagents but Initialize rendered BEFORE this record
 		// applied - without a redraw an emptied medipen/beaker wears its factory-new sprite
 		// (thirty-second pass, "used medipens refreshing").
@@ -240,6 +251,15 @@
 		for(var/list/child as anything in child_contents)
 			restore_persistent_item(child, src, 2, budget)
 		update_appearance() // contents changed without going through the storage datum
+
+/// Floor satchels load exposed because turf/Initialize's levelupdate ran before they existed.
+/// Re-hide after the item-record payload restocks them so firecrackers are not sitting on the
+/// tile for SSair/SSfire to fire_act.
+/obj/item/storage/backpack/satchel/flat/apply_persistent_item_record(list/record)
+	. = ..()
+	var/turf/satchel_turf = get_turf(src)
+	if(satchel_turf)
+		SEND_SIGNAL(src, COMSIG_OBJ_HIDE, satchel_turf.underfloor_accessibility)
 
 // =================================================================================================
 // Shared inventory walk / rebuild
@@ -361,54 +381,62 @@
 	// BORN IN PLACE. No turf, no move, nothing to spill.
 	var/atom/cradle = persistent_item_cradle(destination)
 	var/obj/item/item
-	SSpersistence.restoring_persistent_item = TRUE
+	// Held until this item AND its nested contents finish. Clearing it after `new` used to let
+	// child storage (firework boxes inside a satchel) PopulateContents() mid-restore.
+	SSpersistence.restoring_persistent_item++
 	try
 		item = new item_path(cradle)
 	catch(var/exception/construction_error)
-		SSpersistence.restoring_persistent_item = FALSE
+		SSpersistence.restoring_persistent_item = max(SSpersistence.restoring_persistent_item - 1, 0)
 		log_world("PERSISTENT_MAP: failed to construct restored item [item_path] inside [destination]: [construction_error]")
 		return null
-	SSpersistence.restoring_persistent_item = FALSE
+	if(QDELETED(item))
+		SSpersistence.restoring_persistent_item = max(SSpersistence.restoring_persistent_item - 1, 0)
+		return null
 
-	var/clean_name = sanitize_persistent_text(item_data["name"], PERSISTENT_MAX_NAME_LEN)
-	if(clean_name)
-		item.name = clean_name
-	if(isstack(item) && isnum(item_data["amount"]))
-		var/obj/item/stack/stack = item
-		stack.amount = clamp(round(item_data["amount"]), 1, stack.max_amount)
+	try
+		var/clean_name = sanitize_persistent_text(item_data["name"], PERSISTENT_MAX_NAME_LEN)
+		if(clean_name)
+			item.name = clean_name
+		if(isstack(item) && isnum(item_data["amount"]))
+			var/obj/item/stack/stack = item
+			stack.amount = clamp(round(item_data["amount"]), 1, stack.max_amount)
 
-	item.deserialize_persistent(item_data, depth)
+		item.deserialize_persistent(item_data, depth)
 
-	// Mobs are the one destination where placement is SEMANTIC rather than spatial - an item has to
-	// land in the right equipment slot, not merely inside the mob. Born in the mob's contents above,
-	// so a failed equip leaves it held rather than dropped; only a total failure reaches the floor,
-	// and that is now reported instead of silent.
-	if(ismob(destination))
-		var/mob/mob_dest = destination
-		if(!mob_dest.equip_to_appropriate_slot(item) && !mob_dest.put_in_hands(item))
-			var/turf/drop_turf = get_turf(mob_dest)
-			item.forceMove(drop_turf || mob_dest)
-			// No AREACOORD here: this is an error path and the mob may be in nullspace, which is
-			// exactly where that macro runtimes. Coordinates only when we actually have a turf.
-			log_world("PERSISTENT_MAP: could not equip or hand restored [item.type] to [mob_dest]; left [drop_turf ? "on the floor at [AREACOORD(drop_turf)]" : "inside the mob (nullspace)"].")
+		// Mobs are the one destination where placement is SEMANTIC rather than spatial - an item has to
+		// land in the right equipment slot, not merely inside the mob. Born in the mob's contents above,
+		// so a failed equip leaves it held rather than dropped; only a total failure reaches the floor,
+		// and that is now reported instead of silent.
+		if(ismob(destination))
+			var/mob/mob_dest = destination
+			if(!mob_dest.equip_to_appropriate_slot(item) && !mob_dest.put_in_hands(item))
+				var/turf/drop_turf = get_turf(mob_dest)
+				item.forceMove(drop_turf || mob_dest)
+				// No AREACOORD here: this is an error path and the mob may be in nullspace, which is
+				// exactly where that macro runtimes. Coordinates only when we actually have a turf.
+				log_world("PERSISTENT_MAP: could not equip or hand restored [item.type] to [mob_dest]; left [drop_turf ? "on the floor at [AREACOORD(drop_turf)]" : "inside the mob (nullspace)"].")
 
-	var/list/child_contents = item_data["contents"]
-	if(islist(child_contents) && item.atom_storage)
-		// Saved contents are authoritative: wipe the type-default population (a fresh toolbox
-		// spawns its default tools) so restored containers don't dupe - and emptied ones stay
-		// empty. SAFETY VALVE + STORAGE-AWARE, same as apply_persistent_item_record (BUGS #1-#3):
-		// never wipe on an unrestorable record, and only ever wipe the real storage location.
-		if(persistent_records_restorable(child_contents))
-			var/atom/storage_loc = persistent_storage_location(item)
-			for(var/obj/item/stale in storage_loc.contents.Copy())
-				qdel(stale)
-			for(var/list/child as anything in child_contents)
-				restore_persistent_item(child, item, depth + 1, budget)
-			// Contents changed without going through the storage datum, so refresh what the datum
-			// would normally have refreshed for us.
-			item.update_appearance()
-		else
-			log_world("PERSISTENT_MAP: untrustworthy contents record for restored [item]; keeping default contents.")
+		var/list/child_contents = item_data["contents"]
+		if(islist(child_contents) && item.atom_storage)
+			// Saved contents are authoritative: wipe the type-default population (a fresh toolbox
+			// spawns its default tools) so restored containers don't dupe - and emptied ones stay
+			// empty. SAFETY VALVE + STORAGE-AWARE, same as apply_persistent_item_record (BUGS #1-#3):
+			// never wipe on an unrestorable record, and only ever wipe the real storage location.
+			if(persistent_records_restorable(child_contents))
+				var/atom/storage_loc = persistent_storage_location(item)
+				for(var/obj/item/stale in storage_loc.contents.Copy())
+					qdel(stale)
+				for(var/list/child as anything in child_contents)
+					restore_persistent_item(child, item, depth + 1, budget)
+				// Contents changed without going through the storage datum, so refresh what the datum
+				// would normally have refreshed for us.
+				item.update_appearance()
+			else
+				log_world("PERSISTENT_MAP: untrustworthy contents record for restored [item]; keeping default contents.")
+	catch(var/exception/restore_error)
+		log_world("PERSISTENT_MAP: restore of [item_path] inside [destination] failed: [restore_error]")
+	SSpersistence.restoring_persistent_item = max(SSpersistence.restoring_persistent_item - 1, 0)
 	return item
 
 // =================================================================================================
@@ -517,12 +545,7 @@
 		var/saved_temp = isnum(data["reagent_temp"]) \
 			? clamp(data["reagent_temp"], PERSISTENT_MIN_REAGENT_TEMP, PERSISTENT_MAX_REAGENT_TEMP) \
 			: reagents.chem_temp
-		for(var/list/chem as anything in chems)
-			if(!islist(chem))
-				continue
-			var/chem_path = text2path(chem["type"])
-			if(ispath(chem_path, /datum/reagent))
-				reagents.add_reagent(chem_path, clamp((chem["volume"] || 0), 0, PERSISTENT_MAX_REAGENT_VOLUME), reagtemp = saved_temp, no_react = TRUE)
+		apply_persistent_reagent_list(reagents, chems, saved_temp)
 	// Character voice - bloopers resolve through the SSblooper singleton registry (nothing is ever
 	// instantiated from the file); the TTS voice is validated against the configured speaker list,
 	// mirroring the failsafe the preference itself uses.

@@ -19,10 +19,10 @@
 	/// normal SAVE_SHUTTLEAREA_IGNORE policy keeps only craft that cannot roundstart-respawn.
 	var/list/obj/docking_port/mobile/persistent_shuttles_for_snapshot
 	var/list/area/persistent_shuttle_areas_for_snapshot
-	/// TRUE only while restore_persistent_item() is constructing an item from a saved record. Some
-	/// storage types populate hazardous random defaults from Initialize(); those defaults must not
-	/// exist briefly before the authoritative payload replaces them.
-	var/restoring_persistent_item = FALSE
+	/// Nesting count while restore_persistent_item() is reconstructing an item (and its children)
+	/// from a saved record. Some storage types populate hazardous random defaults from Initialize();
+	/// those defaults must not exist briefly before the authoritative payload replaces them.
+	var/restoring_persistent_item = 0
 
 /// Register a nested payload for the atom currently being serialized by write_map(). No-ops
 /// outside a persistent snapshot pass. Coordinates come from the atom's turf so contained/

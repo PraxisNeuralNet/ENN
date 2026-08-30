@@ -17,7 +17,13 @@
 
 	create_storage(storage_type = storage_type)
 
-	PopulateContents()
+	// SPLURT EDIT CHANGE - PERSISTENT_MAP - skip type-default loot while reconstructing an item
+	// from a snapshot. Nested storage (firework boxes, toolboxes) also PopulateContents on new(),
+	// and those defaults include firecrackers whose fire_act detonates on the still-exposed satchel.
+	// ORIGINAL: PopulateContents()
+	if(!SSpersistence?.restoring_persistent_item)
+		PopulateContents()
+	// SPLURT EDIT END
 
 /obj/item/storage/create_storage(
 	max_slots,

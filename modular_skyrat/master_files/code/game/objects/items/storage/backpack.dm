@@ -1,4 +1,12 @@
 /obj/item/storage/backpack/satchel/flat/PopulateContents()
+	// SPLURT EDIT ADDITION - PERSISTENT_MAP
+	// This override replaced core's PopulateContents, which already skipped loot while a snapshot
+	// was loading. Without the same guard, every DMM satchel rolls fireworks/firecrackers (and a
+	// 20% frag grenade) while still sitting EXPOSED on the tile. firecracker/fire_act detonates
+	// immediately, which is the "smuggler satchels exploding on reload" report.
+	if(persistent_population_suppressed || SSpersistence?.restoring_persistent_item)
+		return
+	// SPLURT EDIT END
 	var/contraband_list = list(
 		/obj/item/storage/belt/utility/syndicate = 1,
 		/obj/item/storage/toolbox/syndicate = 7,
@@ -34,6 +42,8 @@
 		new contraband_type(src)
 
 /obj/item/storage/backpack/satchel/flat/with_tools/PopulateContents()
+	if(persistent_population_suppressed || SSpersistence?.restoring_persistent_item)
+		return
 	new /obj/item/stack/tile/iron/base(src)
 	new /obj/item/crowbar(src)
 
