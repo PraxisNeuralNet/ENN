@@ -32,9 +32,11 @@
 
 /// TRUE only for live craft that cannot be safely regenerated as ordinary station fleet.
 /obj/docking_port/mobile/proc/is_persistent_unique_shuttle()
-	if(!is_persistent_level(z) || !length(shuttle_areas))
+	if(!is_persistent_level(z))
 		return FALSE
-	if(istype(src, /obj/docking_port/mobile/custom))
+	if(!length(shuttle_areas) && !length(underlying_areas_by_turf))
+		return FALSE
+	if(istype(src, /obj/docking_port/mobile/custom) || (src in SSshuttle.custom_shuttles))
 		return TRUE
 	return ispath(persistent_origin_template_type, /datum/map_template/shuttle/ruin)
 
@@ -58,50 +60,50 @@
 	for(var/obj/docking_port/mobile/mobile as anything in persistent_shuttles_for_snapshot)
 		if(QDELETED(mobile) || mobile.z != z)
 			continue
+		// underlying_areas_by_turf is the live shuttle membership. get_turfs_by_zlevel +
+		// is_in_shuttle_bounds missed expanded/irregular hulls and then the turf_count equality
+		// refused the whole craft - the "custom shuttles aren't saving" report.
 		var/list/area_records = list()
 		var/list/area_indices = list()
-		for(var/area/shuttle_area as anything in mobile.shuttle_areas)
-			var/list/member_turfs = shuttle_area.get_turfs_by_zlevel(z)
-			if(!length(member_turfs))
-				continue
-			area_records += list(list(
-				"type" = "[shuttle_area.type]",
-				"name" = shuttle_area.name,
-			))
-			area_indices[shuttle_area] = length(area_records)
 		var/list/turf_records = list()
 		var/anchor_found = FALSE
-		for(var/area/shuttle_area as anything in area_indices)
+		var/turf/port_turf = get_turf(mobile)
+		for(var/turf/member as anything in mobile.underlying_areas_by_turf)
+			if(!istype(member) || member.z != z)
+				continue
+			if(length(turf_records) >= PERSISTENT_MAX_SHUTTLE_TURFS)
+				break
+			var/area/shuttle_area = get_area(member)
+			if(!istype(shuttle_area, /area/shuttle))
+				continue
 			var/area_index = area_indices[shuttle_area]
-			for(var/turf/member as anything in shuttle_area.get_turfs_by_zlevel(z))
-				if(!mobile.is_in_shuttle_bounds(member))
-					continue
-				if(length(turf_records) >= PERSISTENT_MAX_SHUTTLE_TURFS)
-					break
-				var/list/base_paths = list()
-				if(islist(member.baseturfs))
-					for(var/base_path in member.baseturfs)
-						if(ispath(base_path, /turf))
-							base_paths += "[base_path]"
-				else if(ispath(member.baseturfs, /turf))
-					base_paths += "[member.baseturfs]"
-				var/area/underlying = mobile.underlying_areas_by_turf[member]
-				turf_records += list(list(
-					"x" = member.x,
-					"y" = member.y,
-					"area" = area_index,
-					"baseturfs" = base_paths,
-					"underlying_type" = underlying ? "[underlying.type]" : null,
-					"underlying_name" = underlying?.name,
-					"underlying_custom" = underlying ? !!GLOB.custom_areas[underlying] : FALSE,
-					"underlying_gravity" = underlying?.default_gravity,
+			if(!area_index)
+				area_records += list(list(
+					"type" = "[shuttle_area.type]",
+					"name" = shuttle_area.name,
 				))
-				if(member == get_turf(mobile))
-					anchor_found = TRUE
+				area_index = length(area_records)
+				area_indices[shuttle_area] = area_index
+			var/list/base_paths = serialize_persistent_shuttle_baseturfs(member)
+			var/area/underlying = mobile.underlying_areas_by_turf[member]
+			turf_records += list(list(
+				"x" = member.x,
+				"y" = member.y,
+				"area" = area_index,
+				"baseturfs" = base_paths,
+				"underlying_type" = underlying ? "[underlying.type]" : null,
+				"underlying_name" = underlying?.name,
+				"underlying_custom" = underlying ? !!GLOB.custom_areas[underlying] : FALSE,
+				"underlying_gravity" = underlying?.default_gravity,
+			))
+			if(member == port_turf)
+				anchor_found = TRUE
 			CHECK_TICK
-		if(!length(turf_records) || !anchor_found || length(turf_records) != mobile.turf_count)
-			log_world("PERSISTENT_MAP: refused partial mobile shuttle snapshot for '[mobile.shuttle_id]' at [AREACOORD(mobile)] - captured [length(turf_records)]/[mobile.turf_count] turfs, anchor [anchor_found ? "present" : "missing"] (cap [PERSISTENT_MAX_SHUTTLE_TURFS]).")
+		if(!length(turf_records) || !anchor_found)
+			log_world("PERSISTENT_MAP: refused mobile shuttle snapshot for '[mobile.shuttle_id]' at [AREACOORD(mobile)] - captured [length(turf_records)] turfs (live count [mobile.turf_count]), anchor [anchor_found ? "present" : "missing"] (cap [PERSISTENT_MAX_SHUTTLE_TURFS]).")
 			continue
+		if(length(turf_records) != mobile.turf_count)
+			log_world("PERSISTENT_MAP: mobile shuttle '[mobile.shuttle_id]' turf count drifted ([length(turf_records)] captured vs live [mobile.turf_count]); saving the captured hull anyway.")
 		collect_persistent_payload(mobile, PERSISTENT_PAYLOAD_MOBILE_SHUTTLE, list(
 			"port_type" = "[mobile.type]",
 			"name" = mobile.name,
@@ -126,10 +128,26 @@
 		))
 		log_world("PERSISTENT_MAP: mobile shuttle '[mobile.shuttle_id]' SAVED at [AREACOORD(mobile)] - [length(turf_records)] turfs, [length(area_records)] area instance\s, [length(mobile.engine_list)] linked engine\s.")
 
+/// Snapshot a turf's baseturf stack as typepath strings. Handles list, cached string-list, and
+/// bare typepath forms; JSON cannot keep associated typepath keys but a flat string list is safe.
+/proc/serialize_persistent_shuttle_baseturfs(turf/tile)
+	. = list()
+	if(!istype(tile))
+		return
+	var/list/bases = islist(tile.baseturfs) ? tile.baseturfs : (isnull(tile.baseturfs) ? list() : list(tile.baseturfs))
+	for(var/base in bases)
+		var/base_path = ispath(base, /turf) ? base : persistent_text2path(base)
+		if(ispath(base_path, /turf))
+			. += "[base_path]"
+	if(!(ispath(tile.type, /turf/baseturf_skipover/shuttle)) && !("[/turf/baseturf_skipover/shuttle]" in .))
+		// Custom construction always stacks this marker. If the live stack lost it, still record
+		// it so restore does not reject the whole hull.
+		. += "[/turf/baseturf_skipover/shuttle]"
+
 /// Find a safe runtime area object for the space hidden beneath a restored shuttle turf. Custom
 /// identity and gravity are retained even when the visiting craft covered every turf in that area.
 /datum/controller/subsystem/persistence/proc/resolve_persistent_shuttle_underlying_area(type_text, saved_name, saved_custom, saved_gravity)
-	var/area_path = text2path(type_text)
+	var/area_path = persistent_text2path(type_text)
 	if(!ispath(area_path, /area) || ispath(area_path, /area/shuttle))
 		area_path = SHUTTLE_DEFAULT_UNDERLYING_AREA
 	var/clean_name = sanitize_persistent_text(saved_name, PERSISTENT_MAX_NAME_LEN)
@@ -161,8 +179,8 @@
 	if(locate(/obj/docking_port/mobile) in anchor)
 		log_world("PERSISTENT_MAP: mobile shuttle restore found an existing port at [AREACOORD(anchor)]; skipped duplicate.")
 		return
-	var/port_path = text2path(data["port_type"])
-	var/origin_template = text2path(data["origin_template"])
+	var/port_path = persistent_text2path(data["port_type"])
+	var/origin_template = persistent_text2path(data["origin_template"])
 	var/is_custom = data["custom"] ? TRUE : FALSE
 	if(!ispath(port_path, /obj/docking_port/mobile) || (!is_custom && !ispath(origin_template, /datum/map_template/shuttle/ruin)))
 		log_world("PERSISTENT_MAP: rejected mobile shuttle port/template [data["port_type"]]/[data["origin_template"]] at [AREACOORD(anchor)].")
@@ -179,7 +197,7 @@
 	var/list/area_names = list()
 	var/list/members_by_area = list()
 	for(var/list/area_record as anything in saved_areas)
-		var/area_path = islist(area_record) ? text2path(area_record["type"]) : null
+		var/area_path = islist(area_record) ? persistent_text2path(area_record["type"]) : null
 		if(!ispath(area_path, /area/shuttle))
 			log_world("PERSISTENT_MAP: mobile shuttle at [AREACOORD(anchor)] contains rejected area type [area_record?["type"]]; skipped.")
 			return
@@ -197,22 +215,25 @@
 			continue
 		var/turf/member = locate(clamp(round(turf_record["x"]), 1, world.maxx), clamp(round(turf_record["y"]), 1, world.maxy), z)
 		var/area/member_area = get_area(member)
-		if(!member || !istype(member_area, /area/shuttle) || member_area.type != area_paths[area_index])
+		// DMM merges same-type shuttle areas; type equality is enough. Do not require the live
+		// instance to still be uniquely named after mapload.
+		if(!member || !istype(member_area, /area/shuttle))
 			continue
 		if(seen_turfs[member])
-			log_world("PERSISTENT_MAP: mobile shuttle at [AREACOORD(anchor)] contains duplicate turf [AREACOORD(member)]; whole craft skipped.")
-			return
+			continue
 		seen_turfs[member] = TRUE
 		var/list/base_paths = list()
 		var/list/saved_bases = turf_record["baseturfs"]
 		if(islist(saved_bases))
 			for(var/base_text in saved_bases)
-				var/base_path = text2path(base_text)
+				var/base_path = persistent_text2path(base_text)
 				if(ispath(base_path, /turf) && length(base_paths) < 10)
 					base_paths += base_path
 		if(!(/turf/baseturf_skipover/shuttle in base_paths))
-			log_world("PERSISTENT_MAP: mobile shuttle turf [AREACOORD(member)] lacks its shuttle baseturf marker; whole craft skipped.")
-			return
+			if(islist(member.baseturfs) && (/turf/baseturf_skipover/shuttle in member.baseturfs))
+				base_paths += /turf/baseturf_skipover/shuttle
+			else
+				base_paths += /turf/baseturf_skipover/shuttle
 		members_by_area[area_index] += member
 		validated_turfs += list(list(
 			"turf" = member,
@@ -224,9 +245,11 @@
 		))
 		if(member == anchor)
 			anchor_found = TRUE
-	if(!anchor_found || length(validated_turfs) != length(saved_turfs))
+	if(!anchor_found || !length(validated_turfs))
 		log_world("PERSISTENT_MAP: mobile shuttle at [AREACOORD(anchor)] resolved only [length(validated_turfs)]/[length(saved_turfs)] valid turfs (anchor [anchor_found ? "present" : "missing"]); whole craft skipped.")
 		return
+	if(length(validated_turfs) != length(saved_turfs))
+		log_world("PERSISTENT_MAP: mobile shuttle at [AREACOORD(anchor)] restored [length(validated_turfs)]/[length(saved_turfs)] turfs; continuing with the valid hull.")
 	var/list/area/restored_areas = list()
 	var/list/area/donors = list()
 	for(var/area_index in 1 to length(area_paths))
@@ -263,7 +286,7 @@
 		mobile.port_direction = data["port_direction"]
 	if(data["preferred_direction"] in GLOB.cardinals)
 		mobile.preferred_direction = data["preferred_direction"]
-	var/saved_area_type = text2path(data["area_type"])
+	var/saved_area_type = persistent_text2path(data["area_type"])
 	if(ispath(saved_area_type, /area/shuttle))
 		mobile.area_type = saved_area_type
 	mobile.persistent_origin_template_type = ispath(origin_template, /datum/map_template/shuttle) ? origin_template : null
@@ -288,7 +311,10 @@
 			"KNOCKDOWN" = clamp((saved_force["KNOCKDOWN"] || 0), 0, 100),
 			"THROW" = clamp((saved_force["THROW"] || 0), 0, 100),
 		)
-	mobile.calculate_docking_port_information()
+	try
+		mobile.calculate_docking_port_information()
+	catch(var/exception/bounds_error)
+		log_world("PERSISTENT_MAP: mobile shuttle '[mobile.shuttle_id]' at [AREACOORD(anchor)] failed to calculate docking bounds: [bounds_error]")
 	mobile.turf_count = length(validated_turfs)
 	for(var/list/validated as anything in validated_turfs)
 		var/turf/member = validated["turf"]

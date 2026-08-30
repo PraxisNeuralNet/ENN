@@ -14,6 +14,14 @@
 /proc/persistent_level_role(z)
 	return is_persistent_level(z) ? PERSISTENT_ROLE_STATION : null
 
+/// text2path that survives JSON turning "/datum/foo" values into typepaths.
+/proc/persistent_text2path(value)
+	if(ispath(value))
+		return value
+	if(isnull(value))
+		return null
+	return text2path("[value]")
+
 /// Shuttle areas that persist as STATION content instead of being nooped + template-respawned
 /// (twenty-sixth pass). The aux base is a construction room crews customize like any other room;
 /// re-stamping its template every boot reset the floors and respawned the default furniture
@@ -200,8 +208,13 @@
 		return TRUE
 	if(istype(target, /area/station/holodeck))
 		return TRUE
-	if(istype(target, /area/shuttle) && !is_persistent_exempt_shuttle_area(target))
-		return TRUE
+	if(istype(target, /area/shuttle))
+		// Unique custom/visiting hulls are owned by the mobile_shuttle payload. Writing them as
+		// mapped-area geometry too made the geometry pass run first and then the shuttle restore
+		// refuse the craft. Aux/pods stay as station rooms and still need geometry.
+		if(SSpersistence?.persistent_shuttle_areas_for_snapshot?[target])
+			return TRUE
+		return !is_persistent_exempt_shuttle_area(target)
 	return FALSE
 
 /// Walk Z_TURFS(z) once and group turfs by their live loc area. Returns list(area = coord_list)
