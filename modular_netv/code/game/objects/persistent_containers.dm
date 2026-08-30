@@ -526,12 +526,12 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	/// stock parts like power cells). Machines otherwise reload with their circuit's tier-1 defaults,
 	/// resetting every upgrade. Only written when something is actually upgraded.
 	var/list/persistent_stock_parts
-	/// Restore staging for a LOCAL material container's contents ("[material typepath]" -> amount).
-	/// New snapshots carry this in the JSON payload sidecar; the saved var remains solely so snapshots
-	/// written by the older inline-DMM implementation still load. Populated only for types opting in via
-	/// get_persistent_material_container() (autolathe, etc. - the ore silo keeps its own bespoke
-	/// persistent_silo_materials for save compatibility). Consumed by the payload walk AFTER
-	/// stock-part restore, so upgraded matter-bin capacity is in place before re-insertion.
+	/// Restore staging for a LOCAL material container's contents. New snapshots carry a list of
+	/// list("type" = typepath string, "amount" = units) records in the JSON payload sidecar. The
+	/// saved var remains so snapshots written by the older inline-DMM assoc-map implementation still
+	/// load. Populated only for types opting in via get_persistent_material_container() (autolathe,
+	/// etc. - the ore silo keeps its own bespoke persistent_silo_materials for save compatibility).
+	/// Consumed AFTER stock-part restore, so upgraded matter-bin capacity is in place before re-insertion.
 	var/list/persistent_machine_materials
 
 /// The machine's own material container whose contents should persist, or null. Opt-in hook:
@@ -545,6 +545,38 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 /obj/machinery/autolathe/get_persistent_material_container()
 	return materials
 
+/// Parse a saved material store into list(list("type" = typepath, "amount" = num)).
+///
+/// Accepts the current JSON list-of-records format AND the legacy assoc "[typepath]" -> amount
+/// format (inline DMM var / first sidecar). JSON object keys that look like typepaths do not
+/// round-trip as usable assoc values - the same trap mutation_index hits in mob_serialization.dm -
+/// so restore stringifies before text2path and also accepts already-resolved typepaths / numeric
+/// strings. Returns an empty list for an authoritative empty store; garbage in still yields empty
+/// (the caller distinguishes "empty on purpose" from "nothing parsed" via the input length).
+/proc/parse_persistent_material_store(list/mats)
+	. = list()
+	if(!islist(mats))
+		return
+	for(var/entry in mats)
+		var/mat_path
+		var/amount
+		if(islist(entry))
+			var/list/record = entry
+			mat_path = record["type"]
+			amount = record["amount"]
+		else
+			mat_path = entry
+			amount = mats[entry]
+		if(istext(amount))
+			amount = text2num(amount)
+		if(!isnum(amount) || amount <= 0)
+			continue
+		if(!ispath(mat_path, /datum/material))
+			mat_path = text2path("[mat_path]")
+		if(!ispath(mat_path, /datum/material))
+			continue
+		. += list(list("type" = mat_path, "amount" = amount))
+
 /// Re-insert saved materials into the machine's local container. Paths/amounts come off the
 /// trust-boundary file: path-validated, clamped, and capped to the container's free space
 /// (insert_amount_mat() refuses over-capacity inserts outright rather than partially filling).
@@ -553,17 +585,10 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	persistent_machine_materials = null
 	if(!islist(mats))
 		return
+	var/list/parsed = parse_persistent_material_store(mats)
 	// An occupied record must contain at least one usable material. Do not make a malformed/tampered
 	// record authoritative and clear a machine merely because it happened to decode as a list.
-	var/has_usable_material = !length(mats) // an explicit empty store is authoritative
-	if(!has_usable_material)
-		for(var/mat_text in mats)
-			var/mat_path = text2path(mat_text)
-			var/amount = mats[mat_text]
-			if(ispath(mat_path, /datum/material) && isnum(amount) && amount > 0)
-				has_usable_material = TRUE
-				break
-	if(!has_usable_material)
+	if(length(mats) && !length(parsed))
 		log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] had a material store with no usable entries; current contents left unchanged.")
 		return
 	var/datum/material_container/holder = get_persistent_material_container()
@@ -580,18 +605,19 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	if(!holder.max_amount)
 		RefreshParts()
 		if(!holder.max_amount)
-			log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] has ZERO material capacity even after RefreshParts(); [length(mats)] material\s cannot be restored. Check its matter bins / component_parts.")
+			log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] has ZERO material capacity even after RefreshParts(); [length(parsed)] material\s cannot be restored. Check its matter bins / component_parts.")
 			return
 	// Saved state is authoritative. This is normally all zeroes on a freshly mapped autolathe, but
 	// clearing first also prevents duplication if a future opted-in machine initializes with stock.
 	for(var/datum/material/current_mat as anything in holder.materials)
-		holder.materials[current_mat] = 0
+		if(istype(current_mat))
+			holder.materials[current_mat] = 0
 	var/restored = 0
 	var/requested = 0
 	var/rejected = 0
-	for(var/mat_text in mats)
-		var/mat_path = text2path(mat_text)
-		var/amount = mats[mat_text]
+	for(var/list/record as anything in parsed)
+		var/mat_path = record["type"]
+		var/amount = record["amount"]
 		if(!ispath(mat_path, /datum/material) || !isnum(amount) || amount <= 0)
 			rejected++
 			continue
@@ -601,7 +627,13 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		amount = min(amount, holder.max_amount - holder.total_amount())
 		if(amount <= 0)
 			continue
-		var/datum/material/mat = GET_MATERIAL_REF(mat_path)
+		var/datum/material/mat
+		try
+			mat = GET_MATERIAL_REF(mat_path)
+		catch(var/exception/mat_error)
+			rejected++
+			log_world("PERSISTENT_MAP: material ref [mat_path] failed on [src] at [AREACOORD(src)]: [mat_error]")
+			continue
 		if(!mat)
 			rejected++
 			continue
@@ -609,7 +641,7 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// Logged unconditionally: a silent zero here is exactly the failure mode that made "the autolathe
 	// isn't saving its materials" impossible to diagnose. restored < requested means capacity ran out
 	// (bins downgraded since the save); restored == 0 with requested > 0 means the insert was refused.
-	log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] material store - restored [restored]/[requested] units across [length(mats)] material\s (capacity [holder.max_amount], now holding [holder.total_amount()])[rejected ? ", [rejected] unusable record\s" : ""].")
+	log_world("PERSISTENT_MAP: [type] at [AREACOORD(src)] material store - restored [restored]/[requested] units across [length(parsed)] material\s (capacity [holder.max_amount], now holding [holder.total_amount()])[rejected ? ", [rejected] unusable record\s" : ""].")
 
 /obj/machinery/get_save_vars()
 	. = ..()
@@ -618,16 +650,23 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// component_parts early-return: airlocks and other non-frame machines have no parts list.)
 	. += NAMEOF(src, panel_open)
 	// Local material container snapshot (also before the early return, for the same reason). This
-	// used to be appended to the DMM as a flat associative saved var. Live snapshots showed that
-	// handoff losing the store before the post-load consumer saw it, so it now rides the already
-	// transactional JSON payload sidecar. The wrapper deliberately records an empty store too.
+	// used to be an assoc "[typepath]" -> amount, first as a DMM var and then as a JSON object.
+	// Typepath-looking JSON object keys do not round-trip as usable assoc values (the amounts
+	// vanish, restore sees a list of keys and drops the store). Same pattern as reagents: a list
+	// of {type, amount} records. The wrapper deliberately records an empty store too.
 	var/datum/material_container/mat_holder = get_persistent_material_container()
 	if(istype(mat_holder))
 		var/list/stored = list()
 		for(var/datum/material/stored_mat as anything in mat_holder.materials)
+			if(!istype(stored_mat))
+				continue
 			var/mat_amount = mat_holder.materials[stored_mat]
-			if(mat_amount > 0)
-				stored["[stored_mat.type]"] = mat_amount
+			if(!isnum(mat_amount) || mat_amount <= 0)
+				continue
+			stored += list(list(
+				"type" = "[stored_mat.type]",
+				"amount" = mat_amount,
+			))
 		SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_MACHINE_MATERIALS, list(
 			"materials" = stored,
 		))
@@ -1360,6 +1399,7 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		return
 	var/applied = 0
 	var/failed = 0
+	var/material_stores_applied = 0
 	var/list/payload = safe_json_decode(file2text("[PERSISTENT_MAP_DIR]/[payload_name]"))
 	if(!islist(payload) || payload["version"] != PERSISTENT_PAYLOAD_VERSION)
 		log_world("PERSISTENT_MAP: payload file [payload_name] unreadable or version-mismatched; skipping its restores.")
@@ -1443,9 +1483,15 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 						var/obj/machinery/material_machine = target
 						var/list/material_records = data["materials"]
 						if(istype(material_machine) && islist(material_records))
-							// Stage only. The machinery pass below restores component parts first, then
-							// calls apply_persistent_machine_materials() with the correct bin capacity.
-							material_machine.persistent_machine_materials = material_records.Copy()
+							// Apply on the matched machine itself. Staging-then-SSmachines-walk used to
+							// miss autolathes whose z/registration did not line up, and the previous
+							// assoc-map payload lost amounts in json_encode. Stock parts first so
+							// upgraded matter bins set capacity before insert.
+							material_machine.persistent_machine_materials = material_records
+							if(islist(material_machine.persistent_stock_parts))
+								material_machine.apply_persistent_stock_parts()
+							material_machine.apply_persistent_machine_materials()
+							material_stores_applied++
 					else
 						log_world("PERSISTENT_MAP: unknown payload kind [kind] at ([entry["x"]],[entry["y"]],[z]); skipped.")
 				applied++
@@ -1459,7 +1505,6 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// tiers/door state (the report-#3 tier-loss failure mode).
 	var/tiers_applied = 0
 	var/doors_applied = 0
-	var/material_stores_applied = 0
 	for(var/obj/machinery/machine as anything in SSmachines.get_all_machines())
 		if(machine.z != z)
 			continue
@@ -1473,7 +1518,8 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		// AFTER stock parts: matter-bin upgrades set the container's capacity, and the insert
 		// clamps to free space - restoring materials first would drop the overflow.
 		// islist(), rather than truthiness, preserves an explicitly empty authoritative store.
-		// This consumes both new sidecar staging and the older inline-DMM saved var.
+		// Sidecar MACHINE_MATERIALS entries apply on the matched machine above; this pass still
+		// consumes the older inline-DMM saved var for pre-sidecar snapshots.
 		if(islist(machine.persistent_machine_materials))
 			try
 				machine.apply_persistent_machine_materials()
