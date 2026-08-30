@@ -461,9 +461,9 @@ Used by the AI doomsday and the self-destruct nuke.
 		persistent_snapshot = null
 	if(persistent_snapshot)
 		INIT_ANNOUNCE("Loading PERSISTENT station snapshot (v[persistent_snapshot.version])...")
-	// Role passed as a LITERAL, not as PERSISTENT_ROLE_STATION: NETV's defines are included at the very
+	// Role passed as a LITERAL, not as PERSISTENT_ROLE_STATION: modular_netv's defines are included at the very
 	// end of the .dme (the whole module ships as one block), which is AFTER this file, so the define is
-	// not visible here. Keeping this literal is what lets NETV stay a self-contained block with no
+	// not visible here. Keeping this literal is what lets modular_netv stay a self-contained block with no
 	// include-order claim on core - see NETV_GUIDE.md, "The .dme contract".
 	if(!(persistent_snapshot && load_persistent_group(FailedZs, persistent_snapshot, "station", "Station", ZTRAITS_STATION, current_map.height_autosetup)))
 		//SPLURT EDIT ADDITION END

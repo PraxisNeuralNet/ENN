@@ -235,7 +235,7 @@
 //
 // load_map() is the hook rather than Initialize() because the guard belongs at the point of the
 // stamp, and because it lets the two early returns be fixed at the same time. (Overriding
-// Initialize() would also have been legal - NETV does exactly that for cleanable blood, which core
+// Initialize() would also have been legal - modular_netv does exactly that for cleanable blood, which core
 // also defines - it would just have meant replicating more of the core body for no gain.)
 /obj/modular_map_root/load_map()
 	// Both flags matter: INITIALIZE_IMMEDIATE means a baked root fires DURING LoadGroup, before

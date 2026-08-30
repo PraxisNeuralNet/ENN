@@ -57,10 +57,14 @@
 #define PERSISTENT_PAYLOAD_IV_DRIP "iv_drip" // IV drip attached container record (nineteenth pass)
 #define PERSISTENT_PAYLOAD_CUSTOM_AREA "custom_area" // blueprint-built area: type/name/member turfs (thirtieth pass)
 #define PERSISTENT_PAYLOAD_AREA_RENAME "area_rename" // player-renamed mapped area: type/name (thirtieth pass)
+#define PERSISTENT_PAYLOAD_AREA_GEOMETRY "area_geometry" // mapped unique-area turf set + name/gravity/docking (loc-scan; DMM is type-only)
 /// Cap on member-turf COORDINATE PAIRS restored for one custom area (blueprints cap rooms at
 /// BP_MAX_ROOM_SIZE=300 turfs but areas can be expanded repeatedly; a tampered file must not
 /// be able to swallow a whole z-level into one custom area).
 #define PERSISTENT_MAX_AREA_TURFS 2000
+/// Mapped unique areas (hallways, departments) can exceed the custom-room cap. Restore still
+/// refuses a whole-z swallow from a tampered file.
+#define PERSISTENT_MAX_MAPPED_AREA_TURFS 20000
 /// Trust-boundary cap for one preserved custom/visiting shuttle. Core custom construction defaults
 /// to 250 turfs; this leaves room for admin-built/ruin craft without accepting a whole z-level.
 #define PERSISTENT_MAX_SHUTTLE_TURFS 2000

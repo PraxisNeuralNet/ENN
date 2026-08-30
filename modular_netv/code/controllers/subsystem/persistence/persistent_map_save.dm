@@ -197,68 +197,56 @@
 				"delete_after" = dock.delete_after,
 				"override_can_dock_checks" = dock.override_can_dock_checks,
 			))
-		// Blueprint-built areas + player-renamed areas (thirtieth pass): TGM saves areas by TYPE
-		// only, so custom areas (instances of a shared base type - their cells merge into one
-		// nameless blob on reload) and any player-set area name were lost every boot. Record each
-		// custom area's identity + member turfs on this level, and a bare type+name for renamed
-		// MAPPED areas, anchored at their first member turf. ("area_type" key: collect writes the
-		// anchor TURF's type into "type" itself.)
+		// Area identity (custom rooms + mapped unique-area geometry). TGM saves areas by TYPE only,
+		// so same-type instances merge on reload. Member coords come from turf.loc, not
+		// turfs_by_zlevel - snapshot load uses new_z=TRUE and never fills those lists.
 		var/custom_areas_saved = 0
 		var/custom_areas_skipped = 0
+		var/mapped_geometry_saved = 0
 		var/renames_saved = 0
-		for(var/area/custom_area as anything in GLOB.custom_areas)
-			if(QDELETED(custom_area))
+		var/list/area/membership = persistent_area_membership_by_loc(z)
+		var/list/area/custom_seen = list()
+		for(var/area/live_area as anything in membership)
+			var/list/member_coords = membership[live_area]
+			if(!length(member_coords))
 				continue
-			var/turf/custom_anchor
-			var/list/member_coords = list()
-			for(var/list/zlevel_turfs as anything in custom_area.get_zlevel_turf_lists())
-				for(var/turf/member as anything in zlevel_turfs)
-					if(member.z != z)
-						continue
-					if(!custom_anchor)
-						custom_anchor = member
-					member_coords += member.x
-					member_coords += member.y
-				CHECK_TICK
-			if(!custom_anchor)
-				// The area exists in GLOB.custom_areas but reported no turfs on this level: either it
-				// lives entirely on another z, or its turf lists are stale/empty. Counted so the
-				// summary below can distinguish "nothing to save" from "save silently dropped it".
-				custom_areas_skipped++
+			var/turf/anchor = locate(member_coords[1], member_coords[2], z)
+			if(!anchor)
 				continue
-			collect_persistent_payload(custom_anchor, PERSISTENT_PAYLOAD_CUSTOM_AREA, list(
-				"area_type" = "[custom_area.type]",
-				"name" = custom_area.name,
-				"default_gravity" = custom_area.default_gravity,
-				"turfs" = member_coords,
-			))
-			custom_areas_saved++
-		for(var/area/renamed_area as anything in GLOB.areas)
-			if(QDELETED(renamed_area) || GLOB.custom_areas[renamed_area])
-				continue
-			if(renamed_area.name == initial(renamed_area.name))
-				continue
-			if(istype(renamed_area, /area/shuttle)) // fleet areas regenerate from templates
-				continue
-			var/turf/rename_anchor
-			for(var/list/zlevel_turfs as anything in renamed_area.get_zlevel_turf_lists())
-				for(var/turf/member as anything in zlevel_turfs)
-					if(member.z == z)
-						rename_anchor = member
-						break
-				if(rename_anchor)
-					break
-			if(!rename_anchor)
-				continue
-			collect_persistent_payload(rename_anchor, PERSISTENT_PAYLOAD_AREA_RENAME, list(
-				"area_type" = "[renamed_area.type]",
-				"name" = renamed_area.name,
-			))
-			renames_saved++
+			var/is_custom = !!GLOB.custom_areas[live_area]
+			if(is_custom)
+				custom_seen[live_area] = TRUE
+				collect_persistent_payload(anchor, PERSISTENT_PAYLOAD_CUSTOM_AREA, list(
+					"area_type" = "[live_area.type]",
+					"name" = live_area.name,
+					"default_gravity" = live_area.default_gravity,
+					"allow_shuttle_docking" = live_area.allow_shuttle_docking,
+					"turfs" = member_coords,
+				))
+				custom_areas_saved++
+			else
+				collect_persistent_payload(anchor, PERSISTENT_PAYLOAD_AREA_GEOMETRY, list(
+					"area_type" = "[live_area.type]",
+					"name" = live_area.name,
+					"default_gravity" = live_area.default_gravity,
+					"allow_shuttle_docking" = live_area.allow_shuttle_docking,
+					"turfs" = member_coords,
+				))
+				mapped_geometry_saved++
+				if(live_area.name != initial(live_area.name))
+					collect_persistent_payload(anchor, PERSISTENT_PAYLOAD_AREA_RENAME, list(
+						"area_type" = "[live_area.type]",
+						"name" = live_area.name,
+					))
+					renames_saved++
 			CHECK_TICK
+		for(var/area/custom_area as anything in GLOB.custom_areas)
+			if(QDELETED(custom_area) || custom_seen[custom_area])
+				continue
+			custom_areas_skipped++
 		// One line per level so a "my blueprint rooms vanished" report can be split at the seam:
-		// zero saved here means the SAVE side lost them, non-zero means look at the restore log.
-		log_world("PERSISTENT_MAP: z[z] area records - [custom_areas_saved] custom area\s saved ([length(GLOB.custom_areas)] registered globally, [custom_areas_skipped] with no turfs on this level), [renames_saved] area rename\s saved.")
+		// zero custom saved here means the SAVE side lost them, non-zero means look at the restore log.
+		log_world("PERSISTENT_MAP: z[z] area records - [custom_areas_saved] custom area\s saved ([length(GLOB.custom_areas)] registered globally, [custom_areas_skipped] with no turfs on this level), [mapped_geometry_saved] mapped area\s, [renames_saved] area rename\s saved.")
 		// Keep this last. Restoring a mobile shuttle needs stationary dock metadata and custom
 		// underlying areas to have been reconciled before the port is registered and linked.
 		collect_persistent_shuttles_for_snapshot(z)

@@ -172,6 +172,10 @@ GLOBAL_LIST_INIT(typecache_powerfailure_safe_areas, typecacheof(list(
 		newA.setup(str)
 		newA.default_gravity = oldA.default_gravity
 		GLOB.custom_areas[newA] = TRUE
+		// SPLURT EDIT ADDITION BEGIN - PERSISTENT_MAP - DMM keys areas by type; UNIQUE_AREA would
+		// merge every blueprint room into one instance on reload. Custom areas are instance-scoped.
+		persistent_detach_unique_area(newA)
+		// SPLURT EDIT ADDITION END
 		require_area_resort() //new area registered. resort the names
 	else
 		newA = area_choice

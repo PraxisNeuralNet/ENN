@@ -1381,7 +1381,7 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 				continue
 			var/kind = entry["kind"]
 			// Turf-targeted / creation kinds first: no object matching involved.
-			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK || kind == PERSISTENT_PAYLOAD_MOBILE_SHUTTLE || kind == PERSISTENT_PAYLOAD_CUSTOM_AREA || kind == PERSISTENT_PAYLOAD_AREA_RENAME)
+			if(kind == PERSISTENT_PAYLOAD_TURF_DECALS || kind == PERSISTENT_PAYLOAD_STATIONARY_DOCK || kind == PERSISTENT_PAYLOAD_MOBILE_SHUTTLE || kind == PERSISTENT_PAYLOAD_CUSTOM_AREA || kind == PERSISTENT_PAYLOAD_AREA_RENAME || kind == PERSISTENT_PAYLOAD_AREA_GEOMETRY)
 				try
 					switch(kind)
 						if(PERSISTENT_PAYLOAD_TURF_DECALS)
@@ -1392,6 +1392,8 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 							restore_persistent_mobile_shuttle(tile, data, z)
 						if(PERSISTENT_PAYLOAD_CUSTOM_AREA)
 							restore_persistent_custom_area(tile, data, z)
+						if(PERSISTENT_PAYLOAD_AREA_GEOMETRY)
+							restore_persistent_area_geometry(tile, data, z)
 						if(PERSISTENT_PAYLOAD_AREA_RENAME)
 							restore_persistent_area_rename(tile, data)
 					applied++
@@ -1512,6 +1514,10 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 /// mirroring create_area()'s own epilogue.
 /datum/controller/subsystem/persistence/proc/restore_persistent_custom_area(turf/anchor, list/data, z)
 	var/area_path = text2path(data["area_type"])
+	// Pre-custom-type snapshots used bare /area (UNIQUE_AREA named "Space"). Recreate those rooms
+	// as /area/station/custom so they do not clobber GLOB.areas_by_type[/area] or inherit zero-G.
+	if(area_path == /area)
+		area_path = /area/station/custom
 	if(!ispath(area_path, /area) || ispath(area_path, /area/shuttle) || ispath(area_path, /area/space))
 		log_world("PERSISTENT_MAP: rejected custom area type [data["area_type"]] at [AREACOORD(anchor)].")
 		return
@@ -1520,37 +1526,19 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 		log_world("PERSISTENT_MAP: custom area at [AREACOORD(anchor)] has an unusable name ([json_encode(data["name"])]); not restored.")
 		return
 	var/list/coords = data["turfs"]
-	if(!islist(coords) || length(coords) < 2 || length(coords) % 2)
-		log_world("PERSISTENT_MAP: custom area '[clean_name]' at [AREACOORD(anchor)] has a malformed turf list ([islist(coords) ? "[length(coords)] entries" : "not a list"]); not restored.")
-		return
-	var/list/turf/members = list()
-	var/skipped_members = 0
-	for(var/i in 1 to min(length(coords), PERSISTENT_MAX_AREA_TURFS * 2) step 2)
-		var/member_x = coords[i]
-		var/member_y = coords[i + 1]
-		if(!isnum(member_x) || !isnum(member_y))
-			skipped_members++
-			continue
-		var/turf/member = locate(clamp(round(member_x), 1, world.maxx), clamp(round(member_y), 1, world.maxy), z)
-		if(!member)
-			skipped_members++
-			continue
-		// create_area() refuses to swallow space or shuttle tiles; geometry can drift between save
-		// and load (a wall broken open onto space), so refuse them here too rather than dragging a
-		// space tile into a pressurised room.
-		var/area/member_area = get_area(member)
-		if(isspaceturf(member) || istype(member_area, /area/shuttle) || istype(member_area, /area/space))
-			skipped_members++
-			continue
-		members += member
+	var/saved_count = islist(coords) ? length(coords) / 2 : 0
+	var/list/turf/members = resolve_persistent_area_member_turfs(coords, z, PERSISTENT_MAX_AREA_TURFS)
 	if(!length(members))
-		log_world("PERSISTENT_MAP: custom area '[clean_name]' at [AREACOORD(anchor)] resolved NO usable member turfs out of [length(coords) / 2] saved; not restored.")
+		log_world("PERSISTENT_MAP: custom area '[clean_name]' at [AREACOORD(anchor)] resolved NO usable member turfs out of [saved_count] saved; not restored.")
 		return
 	var/area/new_area = new area_path
+	persistent_detach_unique_area(new_area)
 	new_area.AddComponent(/datum/component/custom_area)
 	new_area.setup(clean_name)
 	if(isnum(data["default_gravity"]))
 		new_area.default_gravity = data["default_gravity"]
+	if(!isnull(data["allow_shuttle_docking"]))
+		new_area.allow_shuttle_docking = !!data["allow_shuttle_docking"]
 	GLOB.custom_areas[new_area] = TRUE
 	require_area_resort()
 	var/list/area/affected_areas = list()
@@ -1569,9 +1557,55 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 	// which the one listener tolerates - there is no player to attribute a boot-time restore to.
 	SEND_GLOBAL_SIGNAL(COMSIG_AREA_CREATED, new_area, donor_list, null)
 	for(var/area/donor as anything in donor_list)
-		if(!donor.has_contained_turfs())
+		// has_contained_turfs() reads turfs_by_zlevel, which snapshot load (new_z=TRUE) never
+		// fills. Loc/contents is the live set; qdel'ing a "empty-listed" blob dumps every other
+		// custom room still sitting in it into world.area (/area/space).
+		if(!donor.has_contained_turfs() && !length(donor.contents))
 			qdel(donor)
-	log_world("PERSISTENT_MAP: custom area '[clean_name]' ([area_path]) restored at [AREACOORD(anchor)] with [length(members)] turfs[skipped_members ? ", [skipped_members] saved turfs unusable" : ""].")
+	var/skipped_members = saved_count - length(members)
+	log_world("PERSISTENT_MAP: custom area '[clean_name]' ([area_path]) restored at [AREACOORD(anchor)] with [length(members)] turfs[skipped_members > 0 ? ", [skipped_members] saved turfs unusable" : ""].")
+
+/// Re-apply a mapped unique area's saved turf set after DMM load (type-only). Custom rooms are
+/// handled by restore_persistent_custom_area(); this path must not touch GLOB.custom_areas or it
+/// would merge them back into one UNIQUE_AREA instance.
+/datum/controller/subsystem/persistence/proc/restore_persistent_area_geometry(turf/anchor, list/data, z)
+	var/area_path = text2path(data["area_type"])
+	if(!ispath(area_path, /area) || ispath(area_path, /area/shuttle) || ispath(area_path, /area/space) || ispath(area_path, /area/station/custom))
+		log_world("PERSISTENT_MAP: rejected mapped area geometry type [data["area_type"]] at [AREACOORD(anchor)].")
+		return
+	var/area/target = GLOB.areas_by_type[area_path]
+	if(!target)
+		for(var/area/candidate as anything in GLOB.areas)
+			if(candidate.type == area_path && !GLOB.custom_areas[candidate])
+				target = candidate
+				break
+	if(!target)
+		log_world("PERSISTENT_MAP: mapped area geometry [data["area_type"]] at [AREACOORD(anchor)] has no live instance; not applied.")
+		return
+	var/list/coords = data["turfs"]
+	var/saved_count = islist(coords) ? length(coords) / 2 : 0
+	var/list/turf/members = resolve_persistent_area_member_turfs(coords, z, PERSISTENT_MAX_MAPPED_AREA_TURFS)
+	if(!length(members))
+		log_world("PERSISTENT_MAP: mapped area '[target.name]' ([area_path]) at [AREACOORD(anchor)] resolved NO usable member turfs out of [saved_count] saved; not applied.")
+		return
+	var/list/area/affected_areas = list()
+	set_turfs_to_area(members, target, affected_areas)
+	if(isnum(data["default_gravity"]))
+		target.default_gravity = data["default_gravity"]
+	if(!isnull(data["allow_shuttle_docking"]))
+		target.allow_shuttle_docking = !!data["allow_shuttle_docking"]
+	var/clean_name = sanitize_persistent_text(data["name"], PERSISTENT_MAX_NAME_LEN)
+	if(clean_name && target.name != clean_name)
+		target.name = clean_name
+		require_area_resort()
+	for(var/donor_name in affected_areas)
+		var/area/donor = affected_areas[donor_name]
+		for(var/obj/machinery/door/firedoor/firelock as anything in donor.firedoors)
+			firelock.CalculateAffectingAreas()
+		if(!donor.has_contained_turfs() && !length(donor.contents))
+			qdel(donor)
+	var/skipped_members = saved_count - length(members)
+	log_world("PERSISTENT_MAP: mapped area '[target.name]' ([area_path]) geometry applied at [AREACOORD(anchor)] with [length(members)] turfs[skipped_members > 0 ? ", [skipped_members] saved turfs unusable" : ""].")
 
 /// Re-apply a player-set NAME onto a mapped area instance (thirtieth pass). The anchor turf's
 /// area must still be the recorded TYPE - if the geometry drifted between save and load, keeping

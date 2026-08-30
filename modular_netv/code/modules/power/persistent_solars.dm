@@ -39,14 +39,14 @@
 // Make() is the hook rather than Initialize(): it is called at the end of Initialize, by which point
 // both overlays exist, and its body is five lines rather than eight. It is a proc/ declaration on
 // this type, so ..() cannot reach the core body - hence the verbatim replication below, same as the
-// load_roundstart and load_map overrides elsewhere in NETV.
+// load_roundstart and load_map overrides elsewhere in modular_netv.
 /obj/machinery/power/solar/Make(obj/item/solar_assembly/assembly)
 	// --- core body, replicated verbatim ---
 	if(!assembly)
 		assembly = new /obj/item/solar_assembly(src)
 		assembly.glass_type = /obj/item/stack/sheet/glass
 		assembly.set_anchored(TRUE)
-		// NETV: a maploaded/restored panel builds its own assembly, and core hardcodes basic glass
+		// modular_netv: a maploaded/restored panel builds its own assembly, and core hardcodes basic glass
 		// into it. Nothing reads a solar assembly's glass_type today (deconstruction goes through
 		// material_type instead), so this is consistency rather than a fix - but leaving a
 		// plastitanium panel holding a basic-glass assembly is exactly the kind of quiet mismatch

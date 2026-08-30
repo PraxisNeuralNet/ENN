@@ -182,3 +182,67 @@
 	for(var/list/record as anything in levels)
 		if(record["role"] == role)
 			. += list(record)
+
+/// Custom areas must not occupy GLOB.areas_by_type[type]. DMM/maploader key areas by typepath,
+/// so a UNIQUE_AREA custom room would merge with every other instance of that type on reload.
+/proc/persistent_detach_unique_area(area/target)
+	if(!istype(target))
+		return
+	target.area_flags_mapping &= ~UNIQUE_AREA
+	if(GLOB.areas_by_type[target.type] == target)
+		GLOB.areas_by_type[target.type] = null
+
+/// Space, noops, holodeck, and ordinary (non-exempt) shuttle areas are not written as geometry.
+/proc/persistent_area_geometry_skipped(area/target)
+	if(QDELETED(target))
+		return TRUE
+	if(istype(target, /area/space) || istype(target, /area/template_noop))
+		return TRUE
+	if(istype(target, /area/station/holodeck))
+		return TRUE
+	if(istype(target, /area/shuttle) && !is_persistent_exempt_shuttle_area(target))
+		return TRUE
+	return FALSE
+
+/// Walk Z_TURFS(z) once and group turfs by their live loc area. Returns list(area = coord_list)
+/// where each coord_list is a flat x,y,x,y... sequence. Source of truth is turf.loc, not
+/// turfs_by_zlevel (snapshot load uses new_z=TRUE and never fills those lists).
+/proc/persistent_area_membership_by_loc(z)
+	var/list/area/area_to_coords = list()
+	for(var/turf/tile as anything in Z_TURFS(z))
+		var/area/here = get_area(tile)
+		if(persistent_area_geometry_skipped(here))
+			continue
+		var/list/coords = area_to_coords[here]
+		if(!coords)
+			coords = list()
+			area_to_coords[here] = coords
+		coords += tile.x
+		coords += tile.y
+		CHECK_TICK
+	return area_to_coords
+
+/// Resolve a saved x,y coord list into turfs on z. Skips space TURFS and shuttle areas; does not
+/// skip tiles that currently sit in /area/space (that is a failed-assignment state we want to fix).
+/proc/resolve_persistent_area_member_turfs(list/coords, z, max_pairs)
+	. = list()
+	if(!islist(coords) || length(coords) < 2 || length(coords) % 2)
+		return
+	var/limit = min(length(coords), max_pairs * 2)
+	for(var/i in 1 to limit step 2)
+		var/member_x = coords[i]
+		var/member_y = coords[i + 1]
+		if(!isnum(member_x))
+			member_x = text2num(member_x)
+		if(!isnum(member_y))
+			member_y = text2num(member_y)
+		if(!isnum(member_x) || !isnum(member_y))
+			continue
+		var/turf/member = locate(clamp(round(member_x), 1, world.maxx), clamp(round(member_y), 1, world.maxy), z)
+		if(!member || isspaceturf(member))
+			continue
+		var/area/member_area = get_area(member)
+		if(istype(member_area, /area/shuttle) && !is_persistent_exempt_shuttle_area(member_area))
+			continue
+		. += member
+		CHECK_TICK
