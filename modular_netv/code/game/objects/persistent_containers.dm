@@ -241,37 +241,69 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 // Fire extinguisher cabinets - dedicated single-slot ownership (forty-sixth pass)
 // =================================================================================================
 // The cabinet is not /datum/storage-backed. It owns one raw-contents item through the
-// `stored_extinguisher` reference, and Initialize(mapload) unconditionally creates a fresh full
-// extinguisher. The DMM only carries the cabinet shell, so an empty cabinet regenerated its item on
-// every snapshot boot. A dedicated record is required because EMPTY is authoritative state too.
+// `stored_extinguisher` reference, and core Initialize(mapload) unconditionally creates a fresh
+// full extinguisher. The DMM only carries the cabinet shell, so an empty cabinet regenerated its
+// item on every snapshot boot. EMPTY is authoritative: a payload with slot "empty" (or no usable
+// extinguisher record) must wipe the mapload default. Occupied=FALSE was encoded as JSON 0 and
+// dropped on decode, so apply returned early and the minted bottle stayed - the respawn report.
+
+/// Snapshot mapload must not mint a default bottle. Persistent_snapshot_staging covers inits that
+/// fire during LoadGroup; persistent_station_loaded covers SSatoms running after mapping returns.
+/obj/structure/extinguisher_cabinet/Initialize(mapload)
+	. = ..()
+	if(!mapload)
+		opened = TRUE
+	else
+		if(!(SSmapping?.persistent_snapshot_staging || SSmapping?.persistent_station_loaded))
+			stored_extinguisher = new /obj/item/extinguisher(src)
+		find_and_mount_on_atom()
+	update_appearance(UPDATE_ICON)
+	register_context()
 
 /obj/structure/extinguisher_cabinet/get_save_vars()
 	. = ..()
 	. += NAMEOF(src, opened)
-	var/list/extinguisher_record = stored_extinguisher?.serialize_persistent(1)
-	SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_EXTINGUISHER_CABINET, list(
-		"opened" = opened,
-		"occupied" = !isnull(stored_extinguisher),
-		"extinguisher" = extinguisher_record,
-	))
+	// "empty"/"occupied" are non-empty strings so json_encode cannot drop them the way it drops 0.
+	var/list/cabinet_data = list(
+		"slot" = stored_extinguisher ? "occupied" : "empty",
+		"opened" = opened ? TRUE : FALSE,
+	)
+	if(stored_extinguisher)
+		cabinet_data["extinguisher"] = stored_extinguisher.serialize_persistent(1)
+	SSpersistence.collect_persistent_payload(src, PERSISTENT_PAYLOAD_EXTINGUISHER_CABINET, cabinet_data)
 	return .
 
-/// Replace the mapload-generated default with the authoritative saved slot. If an occupied record
-/// is malformed, retain the default instead of wiping it; only an explicit `occupied = FALSE` may
-/// empty the cabinet.
+/// Replace the mapload-generated default with the authoritative saved slot. A cabinet payload is
+/// itself the signal: missing/unusable item means EMPTY. Only a valid extinguisher record restocks.
 /obj/structure/extinguisher_cabinet/proc/apply_persistent_extinguisher_cabinet(list/data)
-	if(!islist(data) || !("occupied" in data))
+	if(!islist(data))
 		return
-	opened = !!data["opened"]
-	if(!data["occupied"])
+	if(!isnull(data["opened"]))
+		opened = !!data["opened"]
+
+	var/slot = data["slot"]
+	var/occupied
+	if(slot == "occupied")
+		occupied = TRUE
+	else if(slot == "empty")
+		occupied = FALSE
+	else if("occupied" in data)
+		// Legacy sidecar: occupied was a 0/1 flag that JSON often dropped when false.
+		occupied = !!data["occupied"]
+	else
+		// Payload present but no slot flag: no usable item record means the crew emptied it.
+		occupied = islist(data["extinguisher"])
+
+	if(!occupied)
 		QDEL_NULL(stored_extinguisher)
 		update_appearance(UPDATE_ICON)
 		return
 
 	var/list/extinguisher_record = data["extinguisher"]
-	var/extinguisher_path = islist(extinguisher_record) ? text2path(extinguisher_record["type"]) : null
+	var/extinguisher_path = islist(extinguisher_record) ? text2path("[extinguisher_record["type"]]") : null
 	if(!ispath(extinguisher_path, /obj/item/extinguisher) || !is_persistent_type_allowed(extinguisher_path))
-		log_world("PERSISTENT_MAP: invalid occupied extinguisher-cabinet record at [AREACOORD(src)]; keeping the mapload default.")
+		log_world("PERSISTENT_MAP: invalid occupied extinguisher-cabinet record at [AREACOORD(src)]; cabinet left empty.")
+		QDEL_NULL(stored_extinguisher)
 		update_appearance(UPDATE_ICON)
 		return
 
@@ -1444,12 +1476,19 @@ GLOBAL_LIST_INIT(persistent_var_edit_denylist, list(
 				continue
 			// Object-targeted kinds: match the first unconsumed object of the saved type on the tile.
 			var/obj/target
+			var/obj/type_fallback
 			for(var/obj/candidate in tile)
 				if(consumed[candidate])
 					continue
-				if("[candidate.type]" == entry["type"])
+				if("[candidate.type]" == "[entry["type"]]")
 					target = candidate
 					break
+				// Directional cabinet subtypes (/directional/north, etc.) can decode to a parent
+				// typepath string. Prefer exact match; fall back to any unused cabinet on the tile.
+				if(!type_fallback && kind == PERSISTENT_PAYLOAD_EXTINGUISHER_CABINET && istype(candidate, /obj/structure/extinguisher_cabinet))
+					type_fallback = candidate
+			if(!target)
+				target = type_fallback
 			if(!target)
 				failed++
 				log_world("PERSISTENT_MAP: no [entry["type"]] found at ([entry["x"]],[entry["y"]],[z]) for payload kind [kind]; skipped.")
